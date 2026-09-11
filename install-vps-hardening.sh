@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # Target: Debian 12 / 13
 # Authentication model: selectable root + password (default) or root + SSH public key
 
-readonly VERSION="2.1.0"
+readonly HARDENING_VERSION="2.1.1"
 readonly SCRIPT_NAME="VPS Security Hardening"
 readonly BACKUP_ROOT="/root/vps-hardening-backups"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
@@ -207,7 +207,7 @@ trap 'on_error $LINENO' ERR
 
 print_help() {
     cat <<EOF_HELP
-${SCRIPT_NAME} v${VERSION}
+${SCRIPT_NAME} v${HARDENING_VERSION}
 
 用法：
   bash install-vps-hardening.sh
@@ -221,7 +221,7 @@ EOF_HELP
 parse_args() {
     case "${1:-}" in
         --help|-h) print_help; exit 0 ;;
-        --version|-V) printf '%s v%s\n' "$SCRIPT_NAME" "$VERSION"; exit 0 ;;
+        --version|-V) printf '%s v%s\n' "$SCRIPT_NAME" "$HARDENING_VERSION"; exit 0 ;;
         "") ;;
         *) die "未知参数: $1" ;;
     esac
@@ -234,17 +234,30 @@ require_root_and_tty() {
 
 check_os() {
     [[ -r /etc/os-release ]] || die "无法识别操作系统。"
-    # shellcheck disable=SC1091
-    . /etc/os-release
 
-    [[ "${ID:-}" == "debian" ]] || die "当前仅支持 Debian 12/13。检测到: ${PRETTY_NAME:-unknown}"
-    case "${VERSION_ID:-}" in
+    # 在子 shell 中读取 os-release，只提取本脚本需要的字段。
+    # 这样既不会污染当前 shell，也不会与项目自身变量发生命名冲突。
+    local -a os_info=()
+    mapfile -t os_info < <(
+        set +u
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        printf '%s\n%s\n%s\n' "${ID:-}" "${VERSION_ID:-}" "${PRETTY_NAME:-}"
+    )
+
+    local os_id=${os_info[0]:-}
+    local os_version_id=${os_info[1]:-}
+    local os_pretty_name=${os_info[2]:-unknown}
+
+    [[ "$os_id" == "debian" ]] || die "当前仅支持 Debian 12/13。检测到: ${os_pretty_name}"
+    case "$os_version_id" in
         12|13) ;;
         11) die "Debian 11 已结束 Debian 官方 LTS，本 v2 不再支持。请先升级到 Debian 12/13。" ;;
-        *) die "当前仅支持 Debian 12/13。检测到 Debian ${VERSION_ID:-unknown}" ;;
+        *) die "当前仅支持 Debian 12/13。检测到 Debian ${os_version_id:-unknown}" ;;
     esac
-    OS_VERSION_ID=$VERSION_ID
-    OS_PRETTY_NAME=$PRETTY_NAME
+
+    OS_VERSION_ID=$os_version_id
+    OS_PRETTY_NAME=$os_pretty_name
 }
 
 detect_ssh_environment() {
@@ -302,7 +315,7 @@ detect_ipv6() {
 print_header() {
     clear 2>/dev/null || true
     printf '%b\n' "${GREEN}=================================================================${RESET}"
-    printf '%b\n' "${GREEN}       VPS 代理服务器安全加固一键脚本 v${VERSION}（Debian 12/13）${RESET}"
+    printf '%b\n' "${GREEN}       VPS 代理服务器安全加固一键脚本 v${HARDENING_VERSION}（Debian 12/13）${RESET}"
     printf '%b\n' "${GREEN}=================================================================${RESET}"
     printf '%s\n' "设计原则：最小侵入、防失联、可验证、可回滚、可重复执行"
     printf '%s\n' "SSH 登录方式：root + 密码（默认）或 root + SSH 公钥（可选）"
@@ -538,7 +551,7 @@ capture_state_and_backup() {
 
     : > "$BACKUP_DIR/manifest.env"
     manifest_set BACKUP_FORMAT_VERSION "2"
-    manifest_set SCRIPT_VERSION "$VERSION"
+    manifest_set SCRIPT_VERSION "$HARDENING_VERSION"
     manifest_set BACKUP_CREATED "$(date -Is)"
     manifest_set OS_VERSION_ID "$OS_VERSION_ID"
     manifest_set TIMEZONE_OLD "$old_timezone"
@@ -713,7 +726,7 @@ prepare_temporary_ssh_firewall() {
 write_managed_ssh_config() {
     mkdir -p "$(dirname "$SSH_MANAGED_CONFIG")"
     cat > "$SSH_MANAGED_CONFIG" <<EOF_SSH
-# Managed by ${SCRIPT_NAME} v${VERSION}
+# Managed by ${SCRIPT_NAME} v${HARDENING_VERSION}
 # Backup: ${BACKUP_DIR}
 
 Port ${SSH_PORT}
@@ -924,7 +937,7 @@ configure_fail2ban() {
     mkdir -p /etc/fail2ban/jail.d
 
     cat > "$FAIL2BAN_CONFIG" <<EOF_F2B
-# Managed by ${SCRIPT_NAME} v${VERSION}
+# Managed by ${SCRIPT_NAME} v${HARDENING_VERSION}
 [sshd]
 enabled = true
 backend = systemd
@@ -1053,7 +1066,7 @@ print_summary() {
     ip_hint=${ip_hint:-'<你的VPS_IP>'}
 
     printf '\n%b\n' "${GREEN}=================================================================${RESET}"
-    printf '%b\n' "${GREEN}               VPS Security Hardening v${VERSION} 完成${RESET}"
+    printf '%b\n' "${GREEN}               VPS Security Hardening v${HARDENING_VERSION} 完成${RESET}"
     printf '%b\n' "${GREEN}=================================================================${RESET}"
     printf '系统           : %s\n' "$OS_PRETTY_NAME"
     printf '时区           : %s\n' "$TIMEZONE"

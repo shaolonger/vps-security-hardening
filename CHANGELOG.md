@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.1.1 - 2026-09-10
+
+修复 v2.1.0 在 Debian 12/13 上读取 `/etc/os-release` 时可能立即退出的问题。
+
+### Fixed
+
+- 将项目自身的只读版本变量从通用名称 `VERSION` 改为 `HARDENING_VERSION`，避免与 `/etc/os-release` 的标准 `VERSION` 字段冲突。
+- `check_os()` 不再把 `/etc/os-release` 直接 source 到主脚本环境；改为在隔离的子 shell 中读取，仅提取 `ID`、`VERSION_ID`、`PRETTY_NAME`。
+- 避免系统信息字段污染或覆盖项目变量。
+- 同步更新 installer / rollback 的版本显示为 `2.1.1`。
+- 增加针对该问题的实际回归验证：在 Debian 13 环境中 `check_os()` 可正常完成。
+
+---
+
 ## v2.1.0 - 2026-09-10
 
 v2.1 增加可选择的 SSH 认证模式，兼容强制 SSH Key 的 VPS 厂商，同时保持密码模式为默认。

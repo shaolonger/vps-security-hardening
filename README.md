@@ -1,10 +1,12 @@
-# VPS Security Hardening v2.1
+# VPS Security Hardening v2.1.1
 
 一个面向 **Debian 12 / Debian 13** 的交互式 VPS 基础安全加固脚本，适合新 VPS 初始化后执行，也可用于已经存在基础环境的 VPS。
 
 v2.1 的核心目标是：
 
 > **最小侵入、防失联、可验证、可回滚、可重复执行，并兼容“密码登录”和“厂商强制 SSH 密钥登录”两类 VPS。**
+
+> **v2.1.1 修复：**解决项目版本变量 `VERSION` 与 Debian `/etc/os-release` 中同名 `VERSION` 字段冲突、导致脚本在系统预检阶段报 `readonly variable` 的问题。
 
 ---
 
@@ -914,7 +916,7 @@ Ed25519
 当前：
 
 ```text
-v2.1.0
+v2.1.1
 ```
 
 版本变化见：

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly VERSION="2.1.0"
+readonly HARDENING_VERSION="2.1.1"
 readonly BACKUP_ROOT="/root/vps-hardening-backups"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 readonly SSH_MANAGED_CONFIG="/etc/ssh/sshd_config.d/00-vps-hardening.conf"
@@ -109,7 +109,7 @@ select_backup() {
 
 print_help() {
     cat <<EOF_HELP
-VPS Security Hardening rollback v${VERSION}
+VPS Security Hardening rollback v${HARDENING_VERSION}
 
 用法：
   bash rollback.sh             # 交互选择历史备份
