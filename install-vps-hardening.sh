@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # Target: Debian 12 / 13
 # Authentication model: selectable root + password (default) or root + SSH public key
 
-readonly HARDENING_VERSION="2.1.1"
+readonly HARDENING_VERSION="2.1.2"
 readonly SCRIPT_NAME="VPS Security Hardening"
 readonly BACKUP_ROOT="/root/vps-hardening-backups"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
@@ -281,12 +281,85 @@ detect_ssh_environment() {
     CURRENT_SSH_PORT=${CURRENT_SSH_PORT:-unknown}
 }
 
+get_package_manager_busy_info() {
+    local info=""
+
+    # systemd 的 apt 任务是最可靠的第一层信号。
+    if systemctl is-active --quiet apt-daily.service 2>/dev/null; then
+        info+="systemd: apt-daily.service active"$'\n'
+    fi
+    if systemctl is-active --quiet apt-daily-upgrade.service 2>/dev/null; then
+        info+="systemd: apt-daily-upgrade.service active"$'\n'
+    fi
+
+    # 第二层检查真实命令行。不要使用 ps 的 comm 字段识别 unattended-upgrades：
+    # Linux 会把较长的 comm 截断为 unattended-upgr，导致
+    # unattended-upgrade-shutdown --wait-for-signal 被误判成正在执行升级。
+    if command -v ps >/dev/null 2>&1; then
+        local processes
+        processes=$(ps -eo pid=,comm=,args= 2>/dev/null | awk '
+            {
+                pid=$1
+                comm=$2
+                line=$0
+
+                # unattended-upgrade-shutdown 是常驻关机辅助进程，不持有正常升级任务，必须忽略。
+                if (line ~ /unattended-upgrade-shutdown([[:space:]]|$)/) next
+
+                if (comm == "apt" || comm == "apt-get" || comm == "dpkg" ||
+                    line ~ /\/unattended-upgrade([[:space:]]|$)/ ||
+                    line ~ /\/apt\.systemd\.daily([[:space:]]|$)/) {
+                    print "process: " line
+                }
+            }
+        ' || true)
+        if [[ -n "$processes" ]]; then
+            info+="$processes"$'\n'
+        fi
+    fi
+
+    printf '%s' "$info"
+}
+
 check_apt_and_dpkg_state() {
     local busy=""
-    if command -v ps >/dev/null 2>&1; then
-        busy=$(ps -eo comm= 2>/dev/null | grep -E '^(apt|apt-get|dpkg|unattended-upgr)$' | sort -u | tr '\n' ' ' || true)
+    busy=$(get_package_manager_busy_info)
+
+    if [[ -n "$busy" ]]; then
+        warn "检测到真实的软件包管理任务正在运行："
+        printf '%s\n' "$busy"
+        printf '%s\n' "脚本不会终止 apt/dpkg，也不会删除任何锁文件。"
+
+        local answer
+        read -r -p "是否自动等待其完成（最多 15 分钟）？[Y/n]: " answer
+        case "${answer:-Y}" in
+            n|N|no|NO)
+                die "检测到软件包管理任务，已按用户选择安全退出。"
+                ;;
+        esac
+
+        local elapsed=0
+        local max_wait=900
+        local interval=5
+        while (( elapsed < max_wait )); do
+            sleep "$interval"
+            elapsed=$((elapsed + interval))
+            busy=$(get_package_manager_busy_info)
+            if [[ -z "$busy" ]]; then
+                ok "软件包管理任务已结束，继续系统预检。"
+                break
+            fi
+            if (( elapsed % 30 == 0 )); then
+                log "仍在等待软件包管理任务结束……已等待 ${elapsed} 秒。"
+            fi
+        done
+
+        if [[ -n "$busy" ]]; then
+            err "等待 15 分钟后软件包管理任务仍未结束："
+            printf '%s\n' "$busy" >&2
+            die "为避免损坏 dpkg，脚本不会强制终止这些任务。请检查后重新执行。"
+        fi
     fi
-    [[ -z "$busy" ]] || die "检测到其他软件包管理进程正在运行：$busy。请等待其结束后重新执行。"
 
     local audit
     audit=$(dpkg --audit 2>/dev/null || true)

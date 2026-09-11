@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.1.2 - 2026-09-10
+
+修复 APT/DPKG 系统预检把 `unattended-upgrade-shutdown --wait-for-signal` 常驻辅助进程误判为正在执行系统升级的问题。
+
+### Fixed
+
+- 不再使用容易截断进程名的 `ps -eo comm=` 来识别 `unattended-upgrades`。
+- 改为结合 `apt-daily.service`、`apt-daily-upgrade.service` 状态与完整进程命令行识别真实软件包管理任务。
+- 明确排除 `unattended-upgrade-shutdown`，该关机辅助进程即使长期存在也不会阻止脚本运行。
+- 继续识别真正的 `apt`、`apt-get`、`dpkg`、`unattended-upgrade` 与 `apt.systemd.daily`。
+- 检测到真实软件包管理任务时，默认允许安全等待最多 15 分钟；任务结束后自动继续。
+- 等待期间每 30 秒输出一次状态；15 分钟仍未结束则安全退出。
+- 脚本始终不会强制 kill APT/DPKG，也不会删除 dpkg/apt lock 文件。
+- installer / rollback 版本同步更新为 `2.1.2`。
+
+---
+
 ## v2.1.1 - 2026-09-10
 
 修复 v2.1.0 在 Debian 12/13 上读取 `/etc/os-release` 时可能立即退出的问题。

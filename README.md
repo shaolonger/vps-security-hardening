@@ -2,7 +2,7 @@
 
 一个面向 **Debian 12 / Debian 13** 的交互式 VPS 基础安全加固脚本，适合新 VPS 初始化后执行，也可用于已经存在基础环境的 VPS。
 
-v2.1 的核心目标是：
+v2.1.2 的核心目标是：
 
 > **最小侵入、防失联、可验证、可回滚、可重复执行，并兼容“密码登录”和“厂商强制 SSH 密钥登录”两类 VPS。**
 
@@ -204,14 +204,16 @@ sshd -t / sshd -T
 - `ssh.service` / `sshd.service`；
 - `ssh.socket`；
 - 当前 SSH 端口；
-- apt/dpkg 是否已有其他任务；
+- apt/dpkg 是否已有其他真实任务；
+- 检测到真实 APT/DPKG 任务时，可默认自动等待最多 15 分钟；
+- 明确忽略常驻的 `unattended-upgrade-shutdown --wait-for-signal`，避免将其误判为正在升级；
 - `dpkg --audit` 是否异常；
 - 根分区剩余空间；
 - 是否存在全局 IPv6；
 - 新 SSH 端口是否已经被其他程序监听；
 - `443` / `19175` 当前是否已有监听。
 
-不会粗暴删除 APT lock，也不会强制杀死 apt/dpkg。
+不会粗暴删除 APT lock，也不会强制杀死 apt/dpkg。若检测到真实的软件包管理任务，默认可安全等待其完成；等待超时则退出，由用户检查。
 
 ---
 
@@ -649,6 +651,28 @@ bantime = 24h
 apt-daily.timer
 apt-daily-upgrade.timer
 ```
+
+---
+
+# APT / dpkg 并发任务处理
+
+v2.1.2 不再通过会被截断的 `ps comm` 名称判断 `unattended-upgrades`。脚本会结合 systemd 服务状态和完整进程命令行识别真正的：
+
+```text
+apt
+apt-get
+dpkg
+unattended-upgrade
+apt.systemd.daily
+```
+
+以下常驻关机辅助进程会被明确忽略，不会再阻止安装：
+
+```text
+/usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal
+```
+
+如果检测到真正的软件包管理任务，脚本会显示具体任务，并询问是否默认自动等待最多 15 分钟。脚本不会 `kill` APT/DPKG，也不会删除 lock 文件。
 
 ---
 
