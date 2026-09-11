@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # Target: Debian 12 / 13
 # Authentication model: selectable root + password (default) or root + SSH public key
 
-readonly HARDENING_VERSION="2.1.2"
+readonly HARDENING_VERSION="2.2.0"
 readonly SCRIPT_NAME="VPS Security Hardening"
 readonly BACKUP_ROOT="/root/vps-hardening-backups"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
@@ -32,17 +32,35 @@ ERROR_HANDLER_RUNNING=0
 SSH_SERVICE_UNIT=""
 SSH_SOCKET_UNIT="ssh.socket"
 CURRENT_SSH_PORT=""
+SSH_PORT_MODE="keep"
+SSH_INTERNAL_PORT=""
+SSH_EXTERNAL_PORT=""
 HAS_GLOBAL_IPV6=0
 FULL_UPGRADE=1
 TIME_SYNC_SELECTED=""
 AUTH_MODE="password"
 SSH_PUBLIC_KEY=""
 SSH_PUBLIC_KEY_FINGERPRINT=""
+PORT_INPUT=""
 
 log()  { printf '%b\n' "${CYAN}$*${RESET}"; }
 ok()   { printf '%b\n' "${GREEN}$*${RESET}"; }
 warn() { printf '%b\n' "${YELLOW}$*${RESET}"; }
 err()  { printf '%b\n' "${RED}$*${RESET}" >&2; }
+
+prompt_yes_no_default_yes() {
+    local prompt=$1 answer
+    while true; do
+        if ! read -r -p "$prompt" answer; then
+            return 1
+        fi
+        case "${answer,,}" in
+            ""|y|yes) return 0 ;;
+            n|no) return 1 ;;
+            *) warn "请输入 Y/yes 或 N/no；直接回车表示 Y。" ;;
+        esac
+    done
+}
 
 unit_exists() {
     systemctl cat "$1" >/dev/null 2>&1
@@ -330,13 +348,9 @@ check_apt_and_dpkg_state() {
         printf '%s\n' "$busy"
         printf '%s\n' "脚本不会终止 apt/dpkg，也不会删除任何锁文件。"
 
-        local answer
-        read -r -p "是否自动等待其完成（最多 15 分钟）？[Y/n]: " answer
-        case "${answer:-Y}" in
-            n|N|no|NO)
-                die "检测到软件包管理任务，已按用户选择安全退出。"
-                ;;
-        esac
+        if ! prompt_yes_no_default_yes "是否自动等待其完成（最多 15 分钟）？[Y/n]: "; then
+            die "检测到软件包管理任务，已按用户选择安全退出。"
+        fi
 
         local elapsed=0
         local max_wait=900
@@ -411,7 +425,7 @@ print_preflight_summary() {
     printf '%b\n' "${BOLD}预检结果${RESET}"
     printf '  系统               : %s\n' "$OS_PRETTY_NAME"
     printf '  当前 SSH 服务      : %s\n' "$SSH_SERVICE_UNIT"
-    printf '  当前 SSH 连接端口  : %s\n' "$CURRENT_SSH_PORT"
+    printf '  当前 SSH 内部端口  : %s\n' "$CURRENT_SSH_PORT"
     printf '  ssh.socket         : %s\n' "$socket_state"
     printf '  根分区剩余         : %s MiB\n' "$ROOT_FREE_MB"
     printf '  公网/全局 IPv6     : %s\n' "$([[ "$HAS_GLOBAL_IPV6" == "1" ]] && echo '检测到' || echo '未检测到')"
@@ -454,30 +468,103 @@ port_is_current_openssh() {
     /usr/sbin/sshd -T 2>/dev/null | awk '$1=="port" {print $2}' | grep -qx "$port"
 }
 
-choose_ssh_port() {
-    printf '\n%b\n' "${BOLD}2. 设置 SSH 管理端口${RESET}"
-    printf '%s\n' "建议使用 10000-65535 范围内的非冲突端口。默认: 22222"
+valid_tcp_port() {
+    local port=${1:-}
+    [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 ))
+}
 
+prompt_internal_ssh_port() {
+    local prompt=$1 default_port=${2:-22} allow_reserved=${3:-0} port listener
     while true; do
-        read -r -p "请输入 SSH 端口 [22222]: " SSH_PORT
-        SSH_PORT=${SSH_PORT:-22222}
-
-        if [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && (( SSH_PORT >= 10000 && SSH_PORT <= 65535 )); then
-            if [[ "$SSH_PORT" == "443" || "$SSH_PORT" == "19175" ]]; then
-                warn "443 与 19175 已保留给 sing-box，请选择其他 SSH 端口。"
-                continue
-            fi
-
-            local listener
-            listener=$(port_listener_info "$SSH_PORT")
-            if [[ -n "$listener" ]] && ! port_is_current_openssh "$SSH_PORT"; then
-                warn "端口 ${SSH_PORT} 已被其他监听占用："
-                printf '%s\n' "$listener"
-                continue
-            fi
-            break
+        read -r -p "$prompt" port
+        port=${port:-$default_port}
+        if ! valid_tcp_port "$port"; then
+            warn "请输入 1-65535 之间的有效 TCP 端口。"
+            continue
         fi
-        warn "请输入 10000-65535 之间的有效端口。"
+        if [[ "$allow_reserved" != "1" && ( "$port" == "443" || "$port" == "19175" ) ]]; then
+            warn "内部端口 443 与 19175 已预留给 sing-box，请为 SSH 选择其他内部端口。"
+            continue
+        fi
+        listener=$(port_listener_info "$port")
+        if [[ -n "$listener" ]] && ! port_is_current_openssh "$port"; then
+            warn "内部端口 ${port} 已被其他监听占用："
+            printf '%s\n' "$listener"
+            continue
+        fi
+        PORT_INPUT="$port"
+        return 0
+    done
+}
+
+choose_ssh_port_strategy() {
+    printf '\n%b\n' "${BOLD}2. 请选择 SSH 端口策略 [默认: 1]${RESET}"
+    printf '   当前 SSH 会话实际到达 VPS 的内部端口：%s\n' "$CURRENT_SSH_PORT"
+    printf '%s\n' \
+        "   1) 保持当前 VPS 内部 SSH 端口（推荐，默认）" \
+        "   2) 修改 VPS 内部 SSH 端口" \
+        "   3) 厂商 NAT / 公网端口映射（公网端口与 VPS 内部端口不同）"
+
+    local choice internal external
+    while true; do
+        read -r -p "请输入序号 [1-3]: " choice
+        case "${choice:-1}" in
+            1)
+                SSH_PORT_MODE="keep"
+                if valid_tcp_port "$CURRENT_SSH_PORT"; then
+                    SSH_INTERNAL_PORT="$CURRENT_SSH_PORT"
+                else
+                    warn "无法可靠检测当前 SSH 内部端口，需要你手动输入。"
+                    prompt_internal_ssh_port "请输入当前 VPS 内部 SSH 端口 [22]: " 22 1
+                    SSH_INTERNAL_PORT="$PORT_INPUT"
+                fi
+                SSH_EXTERNAL_PORT="$SSH_INTERNAL_PORT"
+                if [[ "$SSH_INTERNAL_PORT" == "443" || "$SSH_INTERNAL_PORT" == "19175" ]]; then
+                    warn "当前 SSH 正在使用 sing-box 预留端口 ${SSH_INTERNAL_PORT}；脚本会保持该端口，但对应 sing-box TCP 服务无法在同一地址上同时占用它。"
+                fi
+                ok "将保持 VPS 内部 SSH 端口 ${SSH_INTERNAL_PORT} 不变。"
+                return 0
+                ;;
+            2)
+                SSH_PORT_MODE="change"
+                prompt_internal_ssh_port "请输入新的 VPS 内部 SSH 端口 [22222]: " 22222
+                SSH_INTERNAL_PORT="$PORT_INPUT"
+                SSH_EXTERNAL_PORT="$SSH_INTERNAL_PORT"
+                if (( SSH_INTERNAL_PORT < 1024 )) && [[ "$SSH_INTERNAL_PORT" != "22" ]]; then
+                    warn "你选择了 1-1023 范围的特权端口 ${SSH_INTERNAL_PORT}；OpenSSH 可使用，但请确认没有与系统服务冲突。"
+                fi
+                ok "将把 VPS 内部 SSH 端口配置为 ${SSH_INTERNAL_PORT}。"
+                return 0
+                ;;
+            3)
+                SSH_PORT_MODE="nat"
+                if valid_tcp_port "$CURRENT_SSH_PORT"; then
+                    SSH_INTERNAL_PORT="$CURRENT_SSH_PORT"
+                else
+                    warn "无法可靠检测当前 SSH 内部端口，需要你手动输入。"
+                    prompt_internal_ssh_port "请输入 VPS 内部 sshd 端口 [22]: " 22 1
+                    SSH_INTERNAL_PORT="$PORT_INPUT"
+                fi
+                while true; do
+                    read -r -p "请输入厂商面板提供的公网 SSH 端口: " external
+                    if valid_tcp_port "$external"; then
+                        SSH_EXTERNAL_PORT="$external"
+                        break
+                    fi
+                    warn "公网映射端口必须是 1-65535 之间的有效 TCP 端口。"
+                done
+                if [[ "$SSH_INTERNAL_PORT" == "443" || "$SSH_INTERNAL_PORT" == "19175" ]]; then
+                    warn "当前 SSH 内部端口 ${SSH_INTERNAL_PORT} 与 sing-box 预留端口冲突；脚本会保留现有 SSH 入口，但对应 sing-box TCP 服务无法在同一地址上同时占用它。"
+                fi
+                if [[ "$SSH_EXTERNAL_PORT" == "443" || "$SSH_EXTERNAL_PORT" == "19175" ]]; then
+                    warn "公网 SSH 映射端口为 ${SSH_EXTERNAL_PORT}；这可能与 sing-box 预期使用的公网端口冲突，请确认厂商的端口分配方案。"
+                fi
+                printf '%b\n' "${YELLOW}已记录厂商端口映射：公网 ${SSH_EXTERNAL_PORT} -> VPS 内部 ${SSH_INTERNAL_PORT}${RESET}"
+                printf '%s\n' "UFW / Fail2ban / sshd 将使用内部端口 ${SSH_INTERNAL_PORT}；登录命令将使用公网端口 ${SSH_EXTERNAL_PORT}。"
+                return 0
+                ;;
+            *) warn "请输入 1、2 或 3。" ;;
+        esac
     done
 }
 
@@ -548,12 +635,11 @@ choose_auth_mode() {
 choose_upgrade_policy() {
     printf '\n%b\n' "${BOLD}4. 是否执行完整的软件包升级？${RESET}"
     printf '%s\n' "新 VPS 推荐执行；已有生产业务时可选择跳过，只安装本脚本必需组件。"
-    local answer
-    read -r -p "执行 apt-get upgrade？[Y/n]: " answer
-    case "${answer:-Y}" in
-        n|N|no|NO) FULL_UPGRADE=0 ;;
-        *) FULL_UPGRADE=1 ;;
-    esac
+    if prompt_yes_no_default_yes "执行 apt-get upgrade？[Y/n]: "; then
+        FULL_UPGRADE=1
+    else
+        FULL_UPGRADE=0
+    fi
 }
 
 warn_reserved_port_usage() {
@@ -572,7 +658,17 @@ confirm_changes() {
     printf '  时区               : %s\n' "$TIMEZONE"
     printf '  完整 apt upgrade   : %s\n' "$([[ "$FULL_UPGRADE" == "1" ]] && echo '是' || echo '否')"
     printf '  SSH 用户           : root\n'
-    printf '  SSH 端口           : %s/tcp\n' "$SSH_PORT"
+    case "$SSH_PORT_MODE" in
+        keep)   printf '  SSH 端口策略       : 保持当前内部端口\n' ;;
+        change) printf '  SSH 端口策略       : 修改内部端口 %s -> %s\n' "$CURRENT_SSH_PORT" "$SSH_INTERNAL_PORT" ;;
+        nat)    printf '  SSH 端口策略       : 厂商 NAT / 公网端口映射\n' ;;
+    esac
+    printf '  SSH 内部端口       : %s/tcp\n' "$SSH_INTERNAL_PORT"
+    if [[ "$SSH_PORT_MODE" == "nat" ]]; then
+        printf '  SSH 公网端口       : %s/tcp -> 内部 %s/tcp\n' "$SSH_EXTERNAL_PORT" "$SSH_INTERNAL_PORT"
+    else
+        printf '  SSH 公网端口       : %s/tcp\n' "$SSH_EXTERNAL_PORT"
+    fi
     if [[ "$AUTH_MODE" == "password" ]]; then
         printf '  SSH 认证方式       : root + 密码（默认模式）\n'
         printf '  root 密码          : 手动重新设置\n'
@@ -582,7 +678,7 @@ confirm_changes() {
         printf '  root 密码          : 不修改，SSH 密码认证关闭\n'
         printf '  authorized_keys    : 保留已有 Key，并追加用户输入 Key（若不存在）\n'
     fi
-    printf '  UFW 最终入站       : %s/tcp (SSH limit)\n' "$SSH_PORT"
+    printf '  UFW 最终入站       : %s/tcp (SSH 内部端口，limit)\n' "$SSH_INTERNAL_PORT"
     printf '                       443/tcp (sing-box VLESS)\n'
     printf '                       19175/tcp + 19175/udp (sing-box Shadowsocks)\n'
     printf '  其他 UFW 入站      : 最终默认拒绝\n'
@@ -591,17 +687,21 @@ confirm_changes() {
     printf '  主机名/sysctl/DNS  : 不修改\n'
     printf '\n'
     warn "最终 UFW 会重置现有 UFW 规则。如果服务器还运行网站、面板等其他公网服务，它们会被关闭端口。"
-    warn "SSH 会采用“两阶段迁移”：先临时放行新端口，重启并验证新登录成功后，才收紧最终 UFW。"
-    warn "如果云厂商有 Security Group / ACL，请确保新 SSH 端口也允许公网访问。"
+    warn "SSH 会采用事务式配置：验证新登录成功后，才收紧最终 UFW；若内部端口发生变化，会先临时放行目标内部端口。"
+    if [[ "$SSH_PORT_MODE" == "nat" ]]; then
+        warn "请确认厂商面板中的 NAT / 端口映射保持为：公网 ${SSH_EXTERNAL_PORT}/tcp -> VPS 内部 ${SSH_INTERNAL_PORT}/tcp。"
+    else
+        warn "如果云厂商有 Security Group / ACL，请确保 ${SSH_EXTERNAL_PORT}/TCP 允许公网访问。"
+    fi
     if [[ "$AUTH_MODE" == "password" ]]; then
         warn "root 密码修改不可由回滚脚本恢复。"
     else
         warn "公钥模式不会修改 root 密码；authorized_keys 会纳入备份并可回滚。请确保你持有对应私钥。"
     fi
 
-    local answer
-    read -r -p "确认继续？请输入 YES: " answer
-    [[ "$answer" == "YES" ]] || die "用户取消执行。"
+    if ! prompt_yes_no_default_yes "确认继续？[Y/n]: "; then
+        die "用户取消执行。"
+    fi
 }
 
 capture_state_and_backup() {
@@ -630,7 +730,10 @@ capture_state_and_backup() {
     manifest_set TIMEZONE_OLD "$old_timezone"
     manifest_set TIMEZONE_NEW "$TIMEZONE"
     manifest_set SSH_PORT_OLD "$CURRENT_SSH_PORT"
-    manifest_set SSH_PORT_NEW "$SSH_PORT"
+    manifest_set SSH_PORT_NEW "$SSH_INTERNAL_PORT"
+    manifest_set SSH_PORT_MODE_NEW "$SSH_PORT_MODE"
+    manifest_set SSH_INTERNAL_PORT_NEW "$SSH_INTERNAL_PORT"
+    manifest_set SSH_EXTERNAL_PORT_NEW "$SSH_EXTERNAL_PORT"
     manifest_set AUTH_MODE_NEW "$AUTH_MODE"
     manifest_set ROOT_AUTH_KEYS_TRACKED "$([[ "$AUTH_MODE" == "publickey" ]] && echo 1 || echo 0)"
     manifest_set ROOT_SSH_DIR_EXISTED "$([[ -d "$ROOT_SSH_DIR" ]] && echo 1 || echo 0)"
@@ -691,11 +794,9 @@ set_root_password_interactive() {
             break
         fi
         warn "root 密码修改失败。"
-        local retry
-        read -r -p "是否重试？[Y/n]: " retry
-        case "${retry:-Y}" in
-            n|N|no|NO) die "未成功设置 root 密码，停止执行。" ;;
-        esac
+        if ! prompt_yes_no_default_yes "是否重试？[Y/n]: "; then
+            die "未成功设置 root 密码，停止执行。"
+        fi
     done
 
     local status
@@ -784,12 +885,12 @@ prepare_temporary_ssh_firewall() {
     . "$BACKUP_DIR/manifest.env"
 
     if [[ "${UFW_WAS_ACTIVE:-0}" == "1" ]]; then
-        log "[3/8] UFW 当前已启用，先临时放行新 SSH 端口 ${SSH_PORT}/tcp……"
-        if [[ "$CURRENT_SSH_PORT" != "$SSH_PORT" ]]; then
-            ufw allow "${SSH_PORT}/tcp" comment 'TEMP vps-hardening SSH migration'
+        log "[3/8] UFW 当前已启用，先临时放行目标 SSH 内部端口 ${SSH_INTERNAL_PORT}/tcp……"
+        if [[ "$CURRENT_SSH_PORT" != "$SSH_INTERNAL_PORT" ]]; then
+            ufw allow "${SSH_INTERNAL_PORT}/tcp" comment 'TEMP vps-hardening SSH migration'
             TEMP_UFW_CHANGED=1
         else
-            ok "新 SSH 端口与当前端口相同，无需增加临时规则。"
+            ok "目标 SSH 内部端口与当前端口相同，无需增加临时规则。"
         fi
     else
         log "[3/8] UFW 当前未启用，暂不启用；将在 SSH 验证成功后配置最终规则。"
@@ -802,7 +903,7 @@ write_managed_ssh_config() {
 # Managed by ${SCRIPT_NAME} v${HARDENING_VERSION}
 # Backup: ${BACKUP_DIR}
 
-Port ${SSH_PORT}
+Port ${SSH_INTERNAL_PORT}
 PermitEmptyPasswords no
 KbdInteractiveAuthentication no
 HostbasedAuthentication no
@@ -861,7 +962,7 @@ validate_new_ssh_config() {
 
     local effective
     effective=$(/usr/sbin/sshd -T -C user=root,host=localhost,addr=127.0.0.1)
-    grep -q "^port ${SSH_PORT}$" <<< "$effective" || die "SSH 有效配置中端口不是 ${SSH_PORT}。"
+    grep -q "^port ${SSH_INTERNAL_PORT}$" <<< "$effective" || die "SSH 有效配置中端口不是 ${SSH_INTERNAL_PORT}。"
 
     if [[ "$AUTH_MODE" == "password" ]]; then
         grep -q '^permitrootlogin yes$' <<< "$effective" || die "SSH 有效配置未允许 root 密码登录。"
@@ -889,7 +990,7 @@ activate_ssh_service_mode() {
     fi
 
     if unit_exists "$SSH_SOCKET_UNIT" && { systemctl is-active --quiet "$SSH_SOCKET_UNIT" 2>/dev/null || [[ "$socket_enabled" == "enabled" || "$socket_enabled" == "enabled-runtime" ]]; }; then
-        warn "检测到 ssh.socket 正在使用或已启用。为确保 sshd_config 的 Port=${SSH_PORT} 在重启后持续生效，将切换为 ${SSH_SERVICE_UNIT} 监听模式。"
+        warn "检测到 ssh.socket 正在使用或已启用。为确保 sshd_config 的 Port=${SSH_INTERNAL_PORT} 在重启后持续生效，将切换为 ${SSH_SERVICE_UNIT} 监听模式。"
         systemctl disable --now "$SSH_SOCKET_UNIT" >/dev/null 2>&1 || true
     fi
 
@@ -900,8 +1001,8 @@ activate_ssh_service_mode() {
 
 check_ssh_listener() {
     local listener
-    listener=$(port_listener_info "$SSH_PORT")
-    [[ -n "$listener" ]] || die "SSH 服务虽已启动，但未检测到 TCP ${SSH_PORT} 监听。"
+    listener=$(port_listener_info "$SSH_INTERNAL_PORT")
+    [[ -n "$listener" ]] || die "SSH 服务虽已启动，但未检测到 TCP ${SSH_INTERNAL_PORT} 监听。"
 }
 
 configure_ssh_transactionally() {
@@ -915,14 +1016,14 @@ configure_ssh_transactionally() {
     activate_ssh_service_mode
     check_ssh_listener
 
-    ok "新的 SSH 配置已加载，${SSH_PORT}/tcp 已监听。"
+    ok "新的 SSH 配置已加载，VPS 内部 ${SSH_INTERNAL_PORT}/tcp 已监听。"
 }
 
 show_ssh_status() {
     printf '\n%s\n' "--- SSH 当前状态 ---"
     systemctl --no-pager --full status "$SSH_SERVICE_UNIT" 2>/dev/null | sed -n '1,10p' || true
-    printf '%s\n' "--- ${SSH_PORT}/TCP 监听 ---"
-    port_listener_info "$SSH_PORT" || true
+    printf '%s\n' "--- VPS 内部 ${SSH_INTERNAL_PORT}/TCP 监听 ---"
+    port_listener_info "$SSH_INTERNAL_PORT" || true
     printf '%s\n' "---------------------"
 }
 
@@ -931,14 +1032,19 @@ verify_new_ssh_interactive() {
     printf '\n%b\n' "${YELLOW}==================== 必须完成 SSH 实测 ====================${RESET}"
     printf '%s\n' "请保持当前窗口不要关闭，然后打开第二个终端窗口实际登录："
     if [[ "$AUTH_MODE" == "password" ]]; then
-        printf '%b\n' "${BOLD}ssh -p ${SSH_PORT} root@<你的VPS_IP>${RESET}"
+        printf '%b\n' "${BOLD}ssh -p ${SSH_EXTERNAL_PORT} root@<你的VPS_IP>${RESET}"
         printf '%s\n' "使用刚刚设置的新 root 密码登录。"
     else
-        printf '%b\n' "${BOLD}ssh -i <对应私钥文件> -p ${SSH_PORT} root@<你的VPS_IP>${RESET}"
+        printf '%b\n' "${BOLD}ssh -i <对应私钥文件> -p ${SSH_EXTERNAL_PORT} root@<你的VPS_IP>${RESET}"
         printf '%s\n' "请使用与你刚才输入的公钥匹配的私钥；如果私钥已由 ssh-agent 管理，可省略 -i。"
         printf '%s\n' "公钥模式下 SSH 密码认证已关闭，因此必须确认密钥登录真实成功。"
     fi
-    printf '%s\n' "如果云厂商有 Security Group / Firewall / ACL，也必须先放行 ${SSH_PORT}/TCP。"
+    if [[ "$SSH_PORT_MODE" == "nat" ]]; then
+        printf '%s\n' "厂商 NAT / 端口映射必须保持：公网 ${SSH_EXTERNAL_PORT}/TCP -> VPS 内部 ${SSH_INTERNAL_PORT}/TCP。"
+        printf '%s\n' "VPS 内部 UFW 放行的是 ${SSH_INTERNAL_PORT}/TCP，不要把公网映射端口 ${SSH_EXTERNAL_PORT} 错填到 UFW/Fail2ban。"
+    else
+        printf '%s\n' "如果云厂商有 Security Group / Firewall / ACL，也必须先放行 ${SSH_EXTERNAL_PORT}/TCP。"
+    fi
     printf '%s\n' "验证成功后回到本窗口输入 VERIFIED；如失败可输入 STATUS 查看状态，或输入 ROLLBACK 自动恢复 SSH/UFW。"
 
     local answer
@@ -989,7 +1095,7 @@ configure_final_ufw() {
     if ! ufw --force reset; then ufw_fail_safe; fi
     if ! ufw default deny incoming; then ufw_fail_safe; fi
     if ! ufw default allow outgoing; then ufw_fail_safe; fi
-    if ! ufw limit "${SSH_PORT}/tcp" comment 'SSH root management'; then ufw_fail_safe; fi
+    if ! ufw limit "${SSH_INTERNAL_PORT}/tcp" comment 'SSH root management'; then ufw_fail_safe; fi
     if ! ufw allow 443/tcp comment 'sing-box VLESS'; then ufw_fail_safe; fi
     if ! ufw allow 19175/tcp comment 'sing-box Shadowsocks TCP'; then ufw_fail_safe; fi
     if ! ufw allow 19175/udp comment 'sing-box Shadowsocks UDP'; then ufw_fail_safe; fi
@@ -1014,7 +1120,7 @@ configure_fail2ban() {
 [sshd]
 enabled = true
 backend = systemd
-port = ${SSH_PORT}
+port = ${SSH_INTERNAL_PORT}
 filter = sshd
 banaction = ufw
 findtime = 10m
@@ -1084,7 +1190,7 @@ final_checks() {
         fi
     fi
     check_line "$SSH_SERVICE_UNIT active" systemctl is-active --quiet "$SSH_SERVICE_UNIT"
-    check_line "SSH ${SSH_PORT}/tcp 正在监听" bash -c "ss -H -ltn 'sport = :${SSH_PORT}' | grep -q ."
+    check_line "SSH ${SSH_INTERNAL_PORT}/tcp 正在监听" bash -c "ss -H -ltn 'sport = :${SSH_INTERNAL_PORT}' | grep -q ."
     if [[ "$AUTH_MODE" == "password" ]]; then
         check_line "PermitRootLogin yes" grep -q '^permitrootlogin yes$' <<< "$effective"
         check_line "PasswordAuthentication yes" grep -q '^passwordauthentication yes$' <<< "$effective"
@@ -1096,7 +1202,7 @@ final_checks() {
         check_line "AuthenticationMethods publickey" grep -q '^authenticationmethods publickey$' <<< "$effective"
     fi
     check_line "UFW active" grep -q '^Status: active' <<< "$ufw_status"
-    check_line "UFW SSH ${SSH_PORT}/tcp" rule_present "$ufw_status" "(^|[[:space:]])${SSH_PORT}/tcp[[:space:]]"
+    check_line "UFW SSH ${SSH_INTERNAL_PORT}/tcp" rule_present "$ufw_status" "(^|[[:space:]])${SSH_INTERNAL_PORT}/tcp[[:space:]]"
     check_line "UFW 443/tcp" rule_present "$ufw_status" '(^|[[:space:]])443/tcp[[:space:]]'
     check_line "UFW 19175/tcp" rule_present "$ufw_status" '(^|[[:space:]])19175/tcp[[:space:]]'
     check_line "UFW 19175/udp" rule_present "$ufw_status" '(^|[[:space:]])19175/udp[[:space:]]'
@@ -1144,21 +1250,27 @@ print_summary() {
     printf '系统           : %s\n' "$OS_PRETTY_NAME"
     printf '时区           : %s\n' "$TIMEZONE"
     printf 'SSH 用户       : root\n'
-    printf 'SSH 端口       : %s\n' "$SSH_PORT"
+    printf 'SSH 内部端口   : %s\n' "$SSH_INTERNAL_PORT"
+    printf 'SSH 公网端口   : %s\n' "$SSH_EXTERNAL_PORT"
+    case "$SSH_PORT_MODE" in
+        keep)   printf 'SSH 端口策略   : 保持当前内部端口\n' ;;
+        change) printf 'SSH 端口策略   : 修改内部端口\n' ;;
+        nat)    printf 'SSH 端口策略   : 厂商 NAT / 公网端口映射\n' ;;
+    esac
     if [[ "$AUTH_MODE" == "password" ]]; then
         printf '认证方式       : root + password\n'
-        printf '登录命令       : ssh -p %s root@%s\n' "$SSH_PORT" "$ip_hint"
+        printf '登录命令       : ssh -p %s root@%s\n' "$SSH_EXTERNAL_PORT" "$([[ "$SSH_PORT_MODE" == "nat" ]] && echo '<你的公网IP>' || echo "$ip_hint")"
         printf '密码登录       : ENABLED\n'
         printf 'SSH 公钥       : 保留系统原有能力，本脚本不主动修改\n'
     else
         printf '认证方式       : root + publickey only\n'
-        printf '登录命令       : ssh -i <private-key> -p %s root@%s\n' "$SSH_PORT" "$ip_hint"
+        printf '登录命令       : ssh -i <private-key> -p %s root@%s\n' "$SSH_EXTERNAL_PORT" "$([[ "$SSH_PORT_MODE" == "nat" ]] && echo '<你的公网IP>' || echo "$ip_hint")"
         printf '密码登录       : DISABLED (SSH)\n'
         printf 'SSH 公钥       : ENABLED；保留已有 Key 并追加本次输入 Key\n'
         [[ -n "$SSH_PUBLIC_KEY_FINGERPRINT" ]] && printf '公钥指纹       : %s\n' "$SSH_PUBLIC_KEY_FINGERPRINT"
     fi
     printf 'UFW            : ACTIVE\n'
-    printf '开放端口       : %s/tcp, 443/tcp, 19175/tcp, 19175/udp\n' "$SSH_PORT"
+    printf 'UFW 内部开放   : %s/tcp, 443/tcp, 19175/tcp, 19175/udp\n' "$SSH_INTERNAL_PORT"
     printf 'IPv6 防火墙    : %s\n' "$([[ "$HAS_GLOBAL_IPV6" == "1" ]] && echo '已校验' || echo '当前未检测到全局 IPv6')"
     printf 'Fail2ban       : ACTIVE (sshd jail)\n'
     printf '自动安全更新   : apt-daily + apt-daily-upgrade timers ACTIVE\n'
@@ -1189,7 +1301,7 @@ main() {
     print_header
     print_preflight_summary
     choose_timezone
-    choose_ssh_port
+    choose_ssh_port_strategy
     choose_auth_mode
     choose_upgrade_policy
     warn_reserved_port_usage

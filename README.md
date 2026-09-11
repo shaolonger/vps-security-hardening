@@ -1,18 +1,138 @@
-# VPS Security Hardening v2.1.1
+# VPS Security Hardening v2.2.0
 
-一个面向 **Debian 12 / Debian 13** 的交互式 VPS 基础安全加固脚本，适合新 VPS 初始化后执行，也可用于已经存在基础环境的 VPS。
+一个面向 **Debian 12 / Debian 13** 的交互式 VPS 基础安全初始化与加固脚本。
 
-v2.1.2 的核心目标是：
+v2.2.0 的核心目标是：
 
-> **最小侵入、防失联、可验证、可回滚、可重复执行，并兼容“密码登录”和“厂商强制 SSH 密钥登录”两类 VPS。**
-
-> **v2.1.1 修复：**解决项目版本变量 `VERSION` 与 Debian `/etc/os-release` 中同名 `VERSION` 字段冲突、导致脚本在系统预检阶段报 `readonly variable` 的问题。
+> **最小侵入、防失联、可验证、可回滚、可重复执行，并兼容普通公网 VPS、厂商自定义 SSH 端口、NAT/端口映射 VPS、密码登录与强制 SSH Key 登录。**
 
 ---
 
-## v2.1 最重要的新功能：SSH 认证方式可选
+## v2.2.0 重点：SSH 内部端口与公网端口分离
 
-安装过程中会询问：
+很多 VPS 厂商面板显示的“SSH 端口”并不一定等于 VPS 内部 `sshd` 真正监听的端口。
+
+例如 NAT VPS 可能是：
+
+```text
+公网 1.2.3.4:35678
+        ↓
+厂商 NAT / Port Forward
+        ↓
+VPS 内部 10.x.x.x:22
+```
+
+这种情况下：
+
+- 登录命令使用公网端口 `35678`；
+- `sshd` 使用内部端口 `22`；
+- UFW 放行内部端口 `22`；
+- Fail2ban 监控内部端口 `22`；
+- **绝不能把内部 sshd 端口改成 35678，除非厂商同步修改 NAT 映射。**
+
+因此 v2.2.0 不再只有一个 `SSH_PORT`，而是明确区分：
+
+```text
+SSH_INTERNAL_PORT  VPS 内部 sshd / UFW / Fail2ban 使用
+SSH_EXTERNAL_PORT  用户从公网连接时使用
+```
+
+---
+
+## SSH 端口策略
+
+脚本会先自动检测当前 SSH 会话实际到达 VPS 的内部端口，然后询问：
+
+```text
+2. 请选择 SSH 端口策略 [默认: 1]
+   当前 SSH 会话实际到达 VPS 的内部端口：22
+
+   1) 保持当前 VPS 内部 SSH 端口（推荐，默认）
+   2) 修改 VPS 内部 SSH 端口
+   3) 厂商 NAT / 公网端口映射（公网端口与 VPS 内部端口不同）
+```
+
+### 1）保持当前内部端口（默认、推荐）
+
+适合绝大多数 VPS，包括厂商已经把系统 SSH 改成自定义端口的情况。
+
+例如当前 SSH 实际进入 VPS 的端口为 `35678`：
+
+```text
+内部 SSH：35678
+公网 SSH：35678
+```
+
+直接回车即可，脚本不会主动把它换成 `22222`。
+
+这是 v2.2.0 与旧版最重要的行为变化之一：**默认不再修改 SSH 端口。**
+
+### 2）主动修改 VPS 内部 SSH 端口
+
+只有明确希望修改内部 `sshd` 端口时才选择此项。
+
+例如：
+
+```text
+当前内部端口：22
+新的内部端口：22222
+```
+
+脚本会：
+
+1. 检查目标端口是否合法、是否被其他服务占用；
+2. 如果 UFW 已启用，先临时放行目标内部端口；
+3. 写入新的 SSH 配置；
+4. `sshd -t` / `sshd -T` 校验；
+5. 重启 SSH；
+6. 确认真正监听新端口；
+7. 要求第二终端真实登录；
+8. 输入 `VERIFIED` 后才最终收紧 UFW。
+
+内部端口允许 `1-65535`，但 `443` 和 `19175` 被本项目预留给 sing-box，因此主动修改模式不允许选择这两个端口。
+
+### 3）厂商 NAT / 公网端口映射
+
+适用于 NAT VPS，例如厂商面板写：
+
+```text
+公网 SSH 端口：35678
+```
+
+但 VPS 内部当前实际 SSH 是：
+
+```text
+22
+```
+
+选择 `3` 后输入：
+
+```text
+公网端口：35678
+```
+
+脚本会记录：
+
+```text
+公网 35678 -> VPS 内部 22
+```
+
+最终：
+
+```text
+sshd     : 22
+UFW      : 22/tcp
+Fail2ban : 22
+登录命令 : ssh -p 35678 root@公网IP
+```
+
+公网映射端口不会错误写入 VPS 内部 UFW 或 Fail2ban。
+
+---
+
+## SSH 认证方式
+
+端口策略之后会询问：
 
 ```text
 3. 请选择 root SSH 登录认证方式 [默认: 1]
@@ -20,18 +140,15 @@ v2.1.2 的核心目标是：
    2) root + SSH 公钥登录（适合厂商强制密钥登录）
 ```
 
-### 方式 1：root + 密码登录（默认）
+### root + 密码（默认）
 
-保持原来的使用习惯：
-
-- 使用 `root` 管理 VPS；
-- 手动设置新的 root 密码；
-- 开启 SSH 密码认证；
+- 使用 `root`；
+- 手动执行 `passwd root` 设置新密码；
+- `PasswordAuthentication yes`；
 - 不创建额外管理员；
-- 不主动写入、删除或禁用服务器已有 SSH 公钥；
-- 如果厂商原本已经配置了可用 Key，它仍可继续作为额外救援登录方式。
+- 不主动删除或禁用厂商已有 SSH Key。
 
-核心 SSH 策略：
+核心策略：
 
 ```text
 PermitRootLogin yes
@@ -39,35 +156,27 @@ PasswordAuthentication yes
 AuthenticationMethods any
 ```
 
-### 方式 2：root + SSH 公钥登录
+### root + SSH 公钥
 
-适合以下 VPS：
+适合厂商强制 SSH Key 的 VPS。
 
-- 厂商禁止密码 SSH；
-- 厂商要求创建实例时绑定 SSH Key；
-- 必须使用厂商平台生成或导入的 Key；
-- 用户希望关闭公网 SSH 密码认证。
-
-脚本会要求手动粘贴一整行 OpenSSH 公钥，例如：
+脚本会要求粘贴一整行 OpenSSH 公钥，例如：
 
 ```text
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... my-key
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... user@example
 ```
 
-然后会：
+随后：
 
-1. 使用 `ssh-keygen` 检查公钥格式；
-2. 计算并显示公钥指纹；
-3. 备份现有 `/root/.ssh/authorized_keys`；
-4. 保留厂商已经写入的所有 Key；
-5. 按公钥**指纹**判断是否已存在；
-6. 已存在则跳过重复写入；
-7. 不存在则追加到 `authorized_keys`；
-8. 设置 `/root/.ssh` 为 `700`、`authorized_keys` 为 `600`；
-9. SSH 改成 **publickey only**；
-10. 第二终端真实密钥登录成功后才继续收紧 UFW。
+- 使用 `ssh-keygen` 验证公钥；
+- 显示 SHA256 指纹；
+- 保留厂商已有 `/root/.ssh/authorized_keys`；
+- 按指纹去重后追加新 Key；
+- 修正 `.ssh` / `authorized_keys` 权限；
+- 公钥模式纳入 SSH 事务和回滚；
+- SSH 密码认证关闭。
 
-核心 SSH 策略：
+核心策略：
 
 ```text
 PermitRootLogin prohibit-password
@@ -77,38 +186,36 @@ AuthenticationMethods publickey
 AuthorizedKeysFile .ssh/authorized_keys
 ```
 
-> 公钥不是私钥。脚本要求输入的是可以公开的 `.pub` 内容，绝对不要粘贴私钥内容。
+> 输入的是 `.pub` 公钥，不是私钥。绝不要粘贴 `-----BEGIN OPENSSH PRIVATE KEY-----` 内容。
 
 ---
 
-# 支持系统
+## 支持系统
 
 正式支持：
 
 - Debian 12 Bookworm
 - Debian 13 Trixie
 
-不支持 Debian 11。
-
-Debian 11 已结束 Debian 官方 LTS，因此脚本会拒绝在 Debian 11 上继续执行。
+Debian 11 已结束 Debian 官方 LTS，脚本会拒绝继续执行。
 
 ---
 
-# 仓库文件
+## 仓库结构
 
 ```text
 vps-security-hardening/
-├── install-vps-hardening.sh   # 一键交互式安装 / 加固
-├── rollback.sh                # 历史备份选择 / 回滚
-├── CHANGELOG.md               # 版本变化
-└── README.md                  # 使用说明
+├── install-vps-hardening.sh
+├── rollback.sh
+├── CHANGELOG.md
+└── README.md
 ```
 
 ---
 
-# 一键执行
+## 一键执行
 
-假设 GitHub 仓库为：
+仓库示例：
 
 ```text
 https://github.com/shaolonger/vps-security-hardening
@@ -120,518 +227,232 @@ https://github.com/shaolonger/vps-security-hardening
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/shaolonger/vps-security-hardening/main/install-vps-hardening.sh)"
 ```
 
-必须以 `root` 身份执行。
-
-查看版本：
+建议先确认版本：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/shaolonger/vps-security-hardening/main/install-vps-hardening.sh)" -- --version
+curl -fsSL https://raw.githubusercontent.com/shaolonger/vps-security-hardening/main/install-vps-hardening.sh \
+  | grep HARDENING_VERSION
 ```
 
-对于会修改 SSH 和防火墙的脚本，更稳妥的方式仍是先下载查看：
+应看到：
 
-```bash
-curl -fsSLO https://raw.githubusercontent.com/shaolonger/vps-security-hardening/main/install-vps-hardening.sh
-less install-vps-hardening.sh
-bash install-vps-hardening.sh
+```text
+readonly HARDENING_VERSION="2.2.0"
 ```
 
 ---
 
-# 完整交互流程
+## 完整交互流程
 
 大致顺序：
 
 ```text
 系统预检
-↓
+  ↓
+检测 Debian / SSH / apt-dpkg / 磁盘 / IPv6
+  ↓
 选择时区
-↓
-选择 SSH 端口
-↓
-选择 SSH 认证方式
-  ├─ root + password（默认）
-  └─ root + publickey
-       └─ 粘贴并校验公钥
-↓
-选择是否执行 apt-get upgrade
-↓
-显示最终修改计划
-↓
-输入 YES
-↓
-创建完整备份
-↓
-APT / 时间同步处理
-↓
-准备认证材料
-  ├─ password → passwd root
-  └─ publickey → 保留并追加 authorized_keys
-↓
-如果 UFW 原本 active，临时允许新 SSH 端口
-↓
-写入 managed SSH 配置
-↓
-sshd -t / sshd -T
-↓
-切换并启动 SSH listener
-↓
-确认新端口实际 LISTEN
-↓
-第二终端真实登录
-↓
-输入 VERIFIED
-↓
-最终重置/收紧 UFW
-↓
-配置 Fail2ban
-↓
-配置自动安全更新
-↓
-最终健康检查
-```
-
----
-
-# 系统预检
-
-脚本修改系统前会检查：
-
-- 必须以 root 执行；
-- 必须有交互式 TTY；
-- Debian 版本；
-- OpenSSH Server 是否存在；
-- `ssh.service` / `sshd.service`；
-- `ssh.socket`；
-- 当前 SSH 端口；
-- apt/dpkg 是否已有其他真实任务；
-- 检测到真实 APT/DPKG 任务时，可默认自动等待最多 15 分钟；
-- 明确忽略常驻的 `unattended-upgrade-shutdown --wait-for-signal`，避免将其误判为正在升级；
-- `dpkg --audit` 是否异常；
-- 根分区剩余空间；
-- 是否存在全局 IPv6；
-- 新 SSH 端口是否已经被其他程序监听；
-- `443` / `19175` 当前是否已有监听。
-
-不会粗暴删除 APT lock，也不会强制杀死 apt/dpkg。若检测到真实的软件包管理任务，默认可安全等待其完成；等待超时则退出，由用户检查。
-
----
-
-# SSH 端口
-
-默认：
-
-```text
-22222
-```
-
-允许范围：
-
-```text
-10000-65535
-```
-
-禁止选择：
-
-```text
-443
-19175
-```
-
-因为这两个端口保留给 sing-box。
-
-如果所选端口已被其他程序监听，会要求重新输入。
-
----
-
-# SSH 配置方式
-
-项目使用：
-
-```text
-/etc/ssh/sshd_config.d/00-vps-hardening.conf
-```
-
-并把精确 `Include` 放到主：
-
-```text
-/etc/ssh/sshd_config
-```
-
-前部，使项目关键策略优先生效，而不是整份覆盖厂商原 SSH 配置。
-
-同时保留：
-
-```text
-LoginGraceTime 30
-MaxAuthTries 3
-MaxSessions 5
-MaxStartups 10:30:60
-ClientAliveInterval 300
-ClientAliveCountMax 2
-X11Forwarding no
-AllowAgentForwarding no
-AllowTcpForwarding yes
-PermitTunnel no
-PermitUserEnvironment no
-LogLevel VERBOSE
-```
-
-不会硬编码固定的 KEX / Cipher / MAC 白名单，让 Debian/OpenSSH 自身安全更新负责算法生命周期。
-
----
-
-# 公钥模式的详细行为
-
-## 不覆盖厂商已有 Key
-
-脚本不会这样做：
-
-```bash
-echo "$KEY" > /root/.ssh/authorized_keys
-```
-
-而是先保留原文件，再追加。
-
-例如原来厂商已经写入：
-
-```text
-ssh-ed25519 AAAA... provider-key
-```
-
-你输入：
-
-```text
-ssh-ed25519 BBBB... my-key
-```
-
-最终会是：
-
-```text
-ssh-ed25519 AAAA... provider-key
-ssh-ed25519 BBBB... my-key
-```
-
-如果你输入的其实就是平台已经写入的同一个 Key，即使注释不同，只要指纹相同，脚本也会跳过重复添加。
-
-## 支持的常见公钥类型
-
-包括：
-
-```text
-ssh-ed25519
-ssh-rsa
-ecdsa-sha2-nistp256
-ecdsa-sha2-nistp384
-ecdsa-sha2-nistp521
-sk-ssh-ed25519@openssh.com
-sk-ecdsa-sha2-nistp256@openssh.com
-```
-
-推荐新建 Key 时优先使用 Ed25519。
-
-## 厂商只给了私钥怎么办？
-
-如果你手中只有私钥文件，例如：
-
-```text
-provider-key
-```
-
-可以在自己的电脑上生成对应公钥：
-
-```bash
-ssh-keygen -y -f provider-key
-```
-
-将输出的：
-
-```text
-ssh-ed25519 AAAA...
-```
-
-粘贴给安装脚本。
-
-**不要把私钥文件本身粘贴进脚本。**
-
-## `.ssh` / `authorized_keys` 是符号链接时
-
-如果检测到：
-
-```text
-/root/.ssh
-```
-
-或：
-
-```text
-/root/.ssh/authorized_keys
-```
-
-是符号链接，脚本会停止公钥模式，不会贸然向链接目标写入内容。
-
-这是为了避免误改厂商通过特殊机制管理的密钥文件。此时应先通过厂商控制台确认该 VPS 的 SSH Key 管理方式。
-
----
-
-# 密码模式
-
-密码模式是默认值。
-
-脚本调用：
-
-```bash
-passwd root
-```
-
-因此密码：
-
-- 不回显；
-- 不进入脚本变量；
-- 不写日志；
-- 不写 backup manifest。
-
-完成后使用：
-
-```bash
-passwd -S root
-```
-
-确认 root 账户密码状态有效。
-
-需要注意：
-
-> `rollback.sh` 无法恢复旧 root 密码，因为脚本从不保存旧密码。
-
----
-
-# 事务式 SSH 迁移
-
-SSH 和防火墙采用两阶段方式。
-
-如果原 UFW 已经 active：
-
-```text
-先临时允许新 SSH 端口
-↓
-写 SSH 配置
-↓
-sshd -t
-↓
-sshd -T
-↓
-重启 SSH
-↓
-检查新端口 LISTEN
-↓
-第二终端真实登录
-↓
+  ↓
+选择 SSH 端口策略
+  ├─ 保持当前内部端口（默认）
+  ├─ 修改内部端口
+  └─ NAT：记录公网端口 -> 内部端口
+  ↓
+选择 root 密码 / SSH 公钥
+  ↓
+选择是否 apt-get upgrade
+  ↓
+最终摘要确认 [Y/n]
+  ↓
+创建备份
+  ↓
+安装必要组件 / 时间同步
+  ↓
+准备密码或 authorized_keys
+  ↓
+事务式配置 SSH
+  ↓
+第二终端实际登录
+  ↓
 VERIFIED
-↓
-最终 ufw reset
+  ↓
+最终 UFW
+  ↓
+Fail2ban
+  ↓
+自动安全更新
+  ↓
+健康检查
 ```
 
-在 `VERIFIED` 之前，如果 SSH 迁移失败，脚本会尽力恢复：
+所有 `[Y/n]` 提示均支持：
 
-- 原 `sshd_config`；
-- 原 managed SSH 配置；
-- 原 Banner；
-- 原 SSH service/socket listener 模式；
-- 原 UFW；
-- v2.1 中记录的原 `authorized_keys`。
-
-密码模式下，已经修改的新 root 密码无法恢复。
+- 直接回车 = `Y`
+- `y / Y / yes / YES` = 继续
+- `n / N / no / NO` = 否
+- 其他输入 = 重新询问
 
 ---
 
-# 必须进行第二终端登录验证
+## UFW 最终规则
 
-新的 SSH listener 启动后，脚本会停在：
+UFW 永远使用 **VPS 内部端口**，不是 NAT 的公网映射端口。
+
+| 端口 | 协议 | 用途 |
+|---|---|---|
+| SSH 内部端口 | TCP | root SSH，使用 `ufw limit` |
+| `443` | TCP | sing-box VLESS / Reality |
+| `19175` | TCP | sing-box Shadowsocks |
+| `19175` | UDP | sing-box Shadowsocks UDP |
+
+其他入站默认拒绝。
+
+例如 NAT：
+
+```text
+公网 35678 -> 内部 22
+```
+
+UFW 应显示的是：
+
+```text
+22/tcp       LIMIT
+443/tcp      ALLOW
+19175/tcp    ALLOW
+19175/udp    ALLOW
+```
+
+而不是 `35678/tcp`。
+
+如果 VPS 有全局 IPv6，脚本还会确保 UFW IPv6 防护处于开启状态并进行最终检查。
+
+---
+
+## Security Group / ACL 与 NAT 的区别
+
+### Security Group / Firewall / ACL
+
+如果是普通公网 VPS：
+
+```text
+公网端口 == VPS 内部端口
+```
+
+厂商安全组必须允许该端口。
+
+例如内部 SSH 为 `22222`：
+
+```text
+Security Group: allow 22222/TCP
+UFW:            allow/limit 22222/TCP
+sshd:           listen 22222
+```
+
+### NAT / Port Forward
+
+如果是：
+
+```text
+公网 35678 -> 内部 22
+```
+
+则：
+
+```text
+厂商面板 NAT : 35678 -> 22
+VPS sshd      : 22
+VPS UFW       : 22
+VPS Fail2ban  : 22
+客户端        : ssh -p 35678 ...
+```
+
+不要把这两种情况混淆。
+
+---
+
+## 第二终端验证
+
+SSH 配置生效后，脚本不会直接继续重置最终 UFW，而是暂停：
 
 ```text
 请输入 VERIFIED / STATUS / ROLLBACK:
 ```
 
-## 密码模式
+### VERIFIED
 
-在第二个终端：
-
-```bash
-ssh -p 22222 root@你的VPS_IP
-```
-
-输入新的 root 密码。
-
-## 公钥模式
-
-在第二个终端：
-
-```bash
-ssh -i /path/to/private-key -p 22222 root@你的VPS_IP
-```
-
-如果对应私钥已经加载进 `ssh-agent`，也可以：
-
-```bash
-ssh -p 22222 root@你的VPS_IP
-```
-
-只有真正登录成功后才回到原窗口输入：
+确认第二终端已经真实登录成功后输入：
 
 ```text
 VERIFIED
 ```
 
-如果失败：
+脚本才继续最终 UFW。
 
-```text
-STATUS
-```
+### STATUS
 
-查看 SSH 服务和监听状态。
+显示当前 SSH 服务和内部监听端口。
 
-或输入：
+### ROLLBACK
 
-```text
-ROLLBACK
-```
+在当前 SSH 事务中立即恢复执行前的 SSH/UFW；公钥模式还会恢复 `authorized_keys`。
 
-恢复本次执行前的 SSH / UFW / `authorized_keys` 状态。
-
-> 不要在没有实际成功登录第二终端的情况下直接输入 `VERIFIED`。
+密码模式下新 root 密码无法恢复为旧密码，因为脚本不会保存旧密码。
 
 ---
 
-# ssh.socket 兼容
+## APT / DPKG 安全预检
 
-部分 Debian 环境使用：
+脚本会识别真正运行中的：
 
-```text
-ssh.socket
-```
+- `apt`
+- `apt-get`
+- `dpkg`
+- `unattended-upgrade`
+- `apt.systemd.daily`
+- `apt-daily.service`
+- `apt-daily-upgrade.service`
 
-systemd socket activation。
-
-v2.1 会检测其 active/enabled 状态；需要时会安全切换到：
-
-```text
-ssh.service
-```
-
-或：
+并明确忽略长期存在的：
 
 ```text
-sshd.service
+unattended-upgrade-shutdown --wait-for-signal
 ```
 
-使选择的 SSH 端口真正由 `sshd_config` 控制。
+发现真实软件包管理任务时，默认可以安全等待最多 15 分钟。
 
-执行前状态会写入 backup manifest，rollback 会尽力恢复原 listener 模式。
+脚本不会：
+
+- `kill -9 apt/dpkg`
+- 删除 `/var/lib/dpkg/lock*`
+- 强行破坏软件包数据库锁
+
+同时会执行 `dpkg --audit` 检查。
 
 ---
 
-# UFW
+## Fail2ban
 
-最终：
-
-```text
-Default incoming: deny
-Default outgoing: allow
-```
-
-只保留：
-
-| 端口 | 协议 | 用途 |
-|---|---|---|
-| 自定义 SSH 端口 | TCP | root SSH 管理，`ufw limit` |
-| `443` | TCP | sing-box VLESS / Reality |
-| `19175` | TCP | sing-box Shadowsocks |
-| `19175` | UDP | sing-box Shadowsocks UDP |
-
-例如：
-
-```text
-22222/tcp     LIMIT
-443/tcp       ALLOW
-19175/tcp     ALLOW
-19175/udp     ALLOW
-```
-
-无论选择密码还是公钥，SSH 防火墙规则都一样。
-
-## 注意：最终会重置现有 UFW
-
-在第二终端 SSH 验证成功后会执行：
-
-```bash
-ufw --force reset
-```
-
-如果服务器还运行：
-
-- Nginx `80/TCP`
-- 管理面板
-- Docker 映射端口
-- Komari
-- 数据库
-- 其他代理/游戏服务
-
-这些端口不会自动保留。
-
----
-
-# IPv6
-
-检测：
-
-```bash
-ip -6 addr show scope global
-```
-
-如果有全局 IPv6，会确保：
-
-```text
-/etc/default/ufw
-IPV6=yes
-```
-
-并在最终健康检查中确认 UFW 存在 `(v6)` 规则。
-
----
-
-# Fail2ban
-
-使用独立文件：
+使用独立配置：
 
 ```text
 /etc/fail2ban/jail.d/99-vps-hardening.local
 ```
 
-不会覆盖：
+不会覆盖已有 `/etc/fail2ban/jail.local`。
+
+默认只管理 `sshd` jail：
 
 ```text
-/etc/fail2ban/jail.local
-```
-
-默认 sshd jail：
-
-```ini
-[sshd]
-enabled = true
-backend = systemd
-port = <SSH端口>
-filter = sshd
-banaction = ufw
 findtime = 10m
 maxretry = 3
-bantime = 24h
+bantime  = 24h
 ```
 
-无论密码还是公钥模式，都保留 Fail2ban 作为公网 SSH 的额外保护层。
+Fail2ban 使用 **SSH 内部端口**。
 
 ---
 
-# 自动安全更新
+## 自动安全更新
 
 创建：
 
@@ -639,120 +460,64 @@ bantime = 24h
 /etc/apt/apt.conf.d/99-vps-hardening-periodic
 ```
 
-不会覆盖 Debian 自带的：
-
-```text
-/etc/apt/apt.conf.d/50unattended-upgrades
-```
-
-开启：
+并确保：
 
 ```text
 apt-daily.timer
 apt-daily-upgrade.timer
 ```
 
----
+处于可用状态。
 
-# APT / dpkg 并发任务处理
-
-v2.1.2 不再通过会被截断的 `ps comm` 名称判断 `unattended-upgrades`。脚本会结合 systemd 服务状态和完整进程命令行识别真正的：
-
-```text
-apt
-apt-get
-dpkg
-unattended-upgrade
-apt.systemd.daily
-```
-
-以下常驻关机辅助进程会被明确忽略，不会再阻止安装：
-
-```text
-/usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal
-```
-
-如果检测到真正的软件包管理任务，脚本会显示具体任务，并询问是否默认自动等待最多 15 分钟。脚本不会 `kill` APT/DPKG，也不会删除 lock 文件。
+不会覆盖 Debian 自带的 `50unattended-upgrades` 软件包选择策略。
 
 ---
 
-# apt upgrade 可选择
+## 时间同步
 
-安装时会询问：
+脚本优先保留系统已经正常工作的时间同步服务，包括：
 
-```text
-执行 apt-get upgrade？[Y/n]:
-```
+- Chrony
+- systemd-timesyncd
+- ntpsec
+- ntp
 
-默认 `Y`。
-
-脚本不会自动：
-
-```bash
-apt autoremove
-```
-
-避免安全初始化脚本擅自删除其他服务依赖。
+只有当前没有有效同步服务时才启用可用服务或安装 Chrony。
 
 ---
 
-# 时间同步
+## 备份
 
-不会无条件替换为 Chrony。
-
-优先保留当前已经 active 的：
-
-- Chrony；
-- systemd-timesyncd；
-- ntpsec；
-- ntp。
-
-只有没有活动时间同步服务时，才会启用已有 `systemd-timesyncd`，或安装 Chrony。
-
----
-
-# 备份
-
-每次运行前创建：
+每次执行前创建唯一目录：
 
 ```text
 /root/vps-hardening-backups/YYYYMMDD_HHMMSS_XXXXXX/
 ```
 
-其中可能包括：
+主要保存：
+
+- `/etc/ssh/sshd_config`
+- 本项目 SSH drop-in
+- SSH Banner
+- UFW 配置
+- Fail2ban drop-in
+- 自动更新配置
+- 公钥模式下的 `/root/.ssh/authorized_keys`
+- 服务状态与端口信息 manifest
+
+v2.2 manifest 额外记录：
 
 ```text
-manifest.env
-sshd_config
-00-vps-hardening.conf
-banner.vps-hardening
-root-authorized_keys   # 仅公钥模式且执行前文件存在时
-ufw/
-default-ufw
-99-vps-hardening.local
-99-vps-hardening-periodic
+SSH_PORT_MODE_NEW
+SSH_INTERNAL_PORT_NEW
+SSH_EXTERNAL_PORT_NEW
 ```
 
-`manifest.env` 会记录：
-
-- 脚本版本；
-- 新旧 SSH 端口；
-- 本次认证方式；
-- SSH service/socket 原状态；
-- UFW 原状态；
-- Fail2ban 原状态；
-- 自动更新 timers；
-- 时区；
-- 时间同步服务；
-- IPv6；
-- 公钥模式下 `/root/.ssh` 是否存在及目录元数据；
-- 公钥模式下 `authorized_keys` 是否存在。
-
-密码模式不会管理或回滚 `authorized_keys`。公钥本身不会写进 manifest；只有公钥模式才会把执行前已有的 `authorized_keys` 作为 root-only 备份文件保存。
+同时继续写入旧字段 `SSH_PORT_OLD` / `SSH_PORT_NEW`，便于兼容 v2 系列回滚逻辑。
 
 ---
 
-# 回滚
+## 回滚
 
 交互选择历史备份：
 
@@ -760,90 +525,55 @@ default-ufw
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/shaolonger/vps-security-hardening/main/rollback.sh)"
 ```
 
-只列出：
+列出备份：
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/shaolonger/vps-security-hardening/main/rollback.sh)" -- --list
 ```
 
-恢复最新 v2 格式备份：
+自动选择最新 v2 备份：
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/shaolonger/vps-security-hardening/main/rollback.sh)" -- --latest
 ```
 
-v2.1 rollback 会恢复：
+回滚会尽量恢复：
 
-- SSH 配置；
-- SSH listener service/socket；
-- UFW；
-- Fail2ban drop-in；
-- 自动更新配置和 timer 状态；
-- 时区；
-- 时间同步状态；
-- **如果备份来自 v2.1：恢复执行前的 `authorized_keys` 状态。**
-
-为了兼容 v2.0：
-
-> 如果旧备份没有 `ROOT_AUTH_KEYS_TRACKED=1`，rollback 会完全不碰 `authorized_keys`，避免把 v2.0 从未管理过的密钥误删。
+- SSH 配置
+- SSH service/socket 状态
+- UFW 配置和 active 状态
+- Fail2ban 配置和服务状态
+- 自动更新配置/timers
+- 时区
+- 时间同步服务状态
+- 公钥模式下原 `authorized_keys`
 
 不会恢复：
 
-- 密码模式下执行前的旧 root 密码；
-- 已安装的软件包；
-- 已经完成升级的软件包版本。
+- 旧 root 密码
+- 已安装的软件包
+- 已经升级的软件包版本
 
 ---
 
-# 最终健康检查
+## 常用检查命令
 
-结束前会检查：
-
-- SSH service active；
-- 新 SSH TCP 端口正在监听；
-- 当前认证方式对应的 OpenSSH 配置；
-- 密码模式下 root 密码状态；
-- 公钥模式下 `authorized_keys`；
-- 公钥模式下本次输入的 Key 指纹确实存在；
-- UFW active；
-- SSH / 443 / 19175 UFW 规则；
-- IPv6 UFW；
-- Fail2ban；
-- sshd jail；
-- apt timers；
-- 时间同步服务。
-
-`443` / `19175` 没有程序监听不会判为失败，因为本项目不负责安装 sing-box，只负责为它们准备防火墙。
-
----
-
-# 常用检查命令
-
-查看版本：
+查看 SSH 有效配置：
 
 ```bash
-bash install-vps-hardening.sh --version
+sshd -T | grep -E '^(port|permitrootlogin|passwordauthentication|pubkeyauthentication|authenticationmethods) '
 ```
 
-查看 SSH 实际配置：
+查看真实监听端口：
 
 ```bash
-sshd -T -C user=root,host=localhost,addr=127.0.0.1 | \
-grep -E '^(port|permitrootlogin|passwordauthentication|pubkeyauthentication|authenticationmethods|authorizedkeysfile) '
+ss -lntp | grep ssh
 ```
 
-查看 SSH：
+查看 SSH 服务：
 
 ```bash
 systemctl status ssh --no-pager
-ss -lntp
-```
-
-查看 root 公钥：
-
-```bash
-cat /root/.ssh/authorized_keys
-ssh-keygen -lf /root/.ssh/authorized_keys
 ```
 
 查看 UFW：
@@ -862,89 +592,36 @@ fail2ban-client status sshd
 查看自动更新：
 
 ```bash
-systemctl status apt-daily.timer --no-pager
-systemctl status apt-daily-upgrade.timer --no-pager
+systemctl status apt-daily.timer apt-daily-upgrade.timer --no-pager
 ```
 
 ---
 
-# 云厂商 Security Group / Firewall / ACL
+## 不会做的事情
 
-本机 UFW 并不能替代云厂商上游防火墙。
+本项目不会：
 
-请确保控制台允许：
-
-```text
-你的 SSH 管理端口 / TCP
-443 / TCP
-19175 / TCP
-19175 / UDP（如使用）
-```
-
-对于强制密钥的厂商：
-
-- 优先使用厂商要求的 Key；
-- 如果平台已经把 Key 写入实例，可以把同一 `.pub` 内容粘贴给本脚本，脚本会按指纹识别并避免重复；
-- 如果平台通过特殊的 `AuthorizedKeysCommand`、符号链接或其他动态机制管理 Key，请不要盲目覆盖平台机制；
-- 脚本的第二终端真实登录验证是最终安全网。
-
----
-
-# 安全说明
-
-## 密码模式
-
-公网 root 密码登录的安全性通常低于密钥认证，因此建议：
-
-- 使用长、唯一、随机的 root 密码；
-- SSH 使用非 22 端口；
-- 保持 Fail2ban 与 UFW；
-- 不复用其他服务密码。
-
-## 公钥模式
-
-更推荐使用：
-
-```text
-Ed25519
-```
-
-并注意：
-
-- 私钥只保存在自己的可信设备；
-- 不要把私钥上传到 VPS 或 GitHub；
-- 私钥可以设置本地 passphrase；
-- 保留厂商 Web Console / Serial Console 等救援入口；
-- 删除不再需要的旧 Key 前先确认至少还有一个可用登录方式。
-
----
-
-# 项目明确不会做什么
-
-不会：
-
-- 修改 hostname；
+- 修改主机名；
 - 创建非 root 管理员；
-- 写 sysctl / BBR；
-- 修改或锁死 `/etc/resolv.conf`；
+- 写入 sysctl/BBR 等内核调优；
+- 强制修改或锁死 `/etc/resolv.conf`；
 - 强制 IPv4 优先；
-- 固定 SSH KEX/Cipher/MAC 白名单；
-- 自动安装 sing-box；
-- 自动执行 `apt autoremove`；
-- 绕过厂商本身的 SSH Key / Security Group 安全策略。
+- 强杀 apt/dpkg；
+- 自动删除厂商已有 SSH Key；
+- 自动修改厂商控制台上的 Security Group / NAT / ACL。
+
+厂商控制台属于 VPS 外部控制面，脚本只能根据用户输入正确配置 VPS 内部系统。
 
 ---
 
-# 版本
+## 安全说明
 
-当前：
+`root + password` 虽然方便，但通常弱于 `root/admin + SSH public key`。如果使用密码模式，至少建议：
 
-```text
-v2.1.1
-```
+- 使用长、随机且唯一的密码；
+- 保持 UFW 与 Fail2ban 正常；
+- 不开放不需要的端口；
+- 有条件时保留厂商 Web Console / VNC / Serial Console；
+- 执行脚本时始终保留当前 SSH 会话，直到第二终端验证完成。
 
-版本变化见：
-
-```text
-CHANGELOG.md
-```
+对于 NAT VPS，请把厂商面板提供的“公网 SSH 端口”和 VPS 内部 sshd 端口分别记录，不要混为一个端口。

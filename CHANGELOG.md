@@ -1,5 +1,55 @@
 # Changelog
 
+## v2.2.0 - 2026-09-11
+
+v2.2.0 重构 SSH 端口模型，正式兼容厂商自定义 SSH 端口与 NAT / 公网端口映射 VPS。
+
+### SSH port model
+
+- 默认行为改为**保持当前检测到的 VPS 内部 SSH 端口不变**，不再默认改成 `22222`。
+- 新增三种端口策略：
+  - 保持当前内部端口（默认、推荐）；
+  - 主动修改 VPS 内部 SSH 端口；
+  - 厂商 NAT / 公网端口映射。
+- 引入独立变量：
+  - `SSH_INTERNAL_PORT`：供 sshd、UFW、Fail2ban 使用；
+  - `SSH_EXTERNAL_PORT`：供用户公网 SSH 登录命令使用；
+  - `SSH_PORT_MODE`：记录 `keep / change / nat`。
+- NAT 模式下明确记录 `公网端口 -> VPS 内部端口`，不会把公网映射端口错误写入 UFW、Fail2ban 或 sshd。
+- 主动修改内部端口时支持 `1-65535`，不再强制 `10000-65535`；仍禁止把内部 SSH 改到本项目预留的 `443` / `19175`。
+- 若选择低于 1024 的非 22 端口，会显示特权端口提示。
+- 第二终端验证命令使用公网端口；SSH 服务监听检查使用内部端口。
+- Security Group / ACL 提示与 NAT 映射提示分开处理。
+
+### Firewall / Fail2ban
+
+- UFW 的 SSH 规则始终使用 `SSH_INTERNAL_PORT`。
+- Fail2ban `sshd` jail 始终使用 `SSH_INTERNAL_PORT`。
+- NAT 外部端口只存在于登录提示和 manifest，不会错误开放在 VPS 内部 UFW。
+
+### Backup / compatibility
+
+- manifest 新增：`SSH_PORT_MODE_NEW`、`SSH_INTERNAL_PORT_NEW`、`SSH_EXTERNAL_PORT_NEW`。
+- 继续保留 `SSH_PORT_OLD` 与 `SSH_PORT_NEW` 字段，维持 v2 系列回滚兼容性。
+- installer / rollback 版本同步更新为 `2.2.0`。
+
+---
+
+## v2.1.3 - 2026-09-11
+
+修复最终执行确认必须精确输入 `YES`、直接回车会被误判为取消的问题，并统一 `[Y/n]` 交互行为。
+
+### Fixed
+
+- 最终确认从 `确认继续？请输入 YES:` 改为 `确认继续？[Y/n]:`。
+- 最终确认直接回车时按默认 `Y` 继续执行。
+- 支持 `y`、`Y`、`yes`、`YES` 确认；支持 `n`、`N`、`no`、`NO` 取消。
+- 对无法识别的输入不再直接取消，而是提示重新输入。
+- 将 APT 等待、完整升级选择、root 密码重试等 `[Y/n]` 交互统一到同一确认函数，保持行为一致。
+- installer / rollback 版本同步更新为 `2.1.3`。
+
+---
+
 ## v2.1.2 - 2026-09-10
 
 修复 APT/DPKG 系统预检把 `unattended-upgrade-shutdown --wait-for-signal` 常驻辅助进程误判为正在执行系统升级的问题。
