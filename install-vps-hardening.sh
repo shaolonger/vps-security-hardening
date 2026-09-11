@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # Target: Debian 12 / 13
 # Authentication model: selectable root + password (default) or root + SSH public key
 
-readonly HARDENING_VERSION="2.2.0"
+readonly HARDENING_VERSION="2.2.1"
 readonly SCRIPT_NAME="VPS Security Hardening"
 readonly BACKUP_ROOT="/root/vps-hardening-backups"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
@@ -1045,13 +1045,14 @@ verify_new_ssh_interactive() {
     else
         printf '%s\n' "如果云厂商有 Security Group / Firewall / ACL，也必须先放行 ${SSH_EXTERNAL_PORT}/TCP。"
     fi
-    printf '%s\n' "验证成功后回到本窗口输入 VERIFIED；如失败可输入 STATUS 查看状态，或输入 ROLLBACK 自动恢复 SSH/UFW。"
+    printf '%s\n' "验证成功后回到本窗口直接按回车即可继续；如失败可输入 STATUS 查看状态，或输入 ROLLBACK 自动恢复 SSH/UFW。"
 
-    local answer
+    local answer normalized
     while true; do
-        read -r -p "请输入 VERIFIED / STATUS / ROLLBACK: " answer
-        case "$answer" in
-            VERIFIED)
+        read -r -p "按回车确认成功，或输入 STATUS / ROLLBACK: " answer
+        normalized=${answer^^}
+        case "$normalized" in
+            ""|VERIFIED)
                 SSH_TRANSACTION_ACTIVE=0
                 ok "已确认第二终端登录成功。现在才会收紧最终 UFW。"
                 return 0
@@ -1068,7 +1069,7 @@ verify_new_ssh_interactive() {
                 fi
                 exit 2
                 ;;
-            *) warn "请输入 VERIFIED、STATUS 或 ROLLBACK。" ;;
+            *) warn "直接按回车表示验证成功；如需排查请输入 STATUS，回滚请输入 ROLLBACK。" ;;
         esac
     done
 }
@@ -1110,6 +1111,33 @@ configure_final_ufw() {
     ok "最终 UFW 已启用。"
 }
 
+wait_for_fail2ban_sshd_jail() {
+    local timeout=${1:-20}
+    local elapsed=0
+
+    while (( elapsed < timeout )); do
+        if systemctl is-active --quiet fail2ban.service 2>/dev/null \
+            && fail2ban-client ping >/dev/null 2>&1 \
+            && fail2ban-client status sshd >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
+print_fail2ban_diagnostics() {
+    warn "Fail2ban 诊断信息："
+    printf '%s\n' '--- fail2ban-client status ---'
+    fail2ban-client status 2>&1 || true
+    printf '%s\n' '--- systemctl status fail2ban ---'
+    systemctl status fail2ban.service --no-pager 2>&1 || true
+    printf '%s\n' '--- recent fail2ban journal ---'
+    journalctl -u fail2ban.service -n 50 --no-pager 2>&1 || true
+    printf '%s\n' '--------------------------------'
+}
+
 configure_fail2ban() {
     CURRENT_STAGE="Fail2ban"
     log "[6/8] 配置 Fail2ban（独立 drop-in，仅 sshd jail）……"
@@ -1131,9 +1159,13 @@ EOF_F2B
     fail2ban-client -t
     systemctl enable fail2ban.service >/dev/null 2>&1 || true
     systemctl restart fail2ban.service
-    systemctl is-active --quiet fail2ban.service || die "Fail2ban 未正常运行。"
-    fail2ban-client status sshd >/dev/null 2>&1 || die "Fail2ban 的 sshd jail 未正常启用。"
-    ok "Fail2ban sshd jail 已启用。"
+
+    if ! wait_for_fail2ban_sshd_jail 20; then
+        print_fail2ban_diagnostics
+        die "Fail2ban 服务启动后 20 秒内仍无法确认 sshd jail 正常加载。请根据上方诊断信息检查。"
+    fi
+
+    ok "Fail2ban sshd jail 已启用并可正常查询。"
 }
 
 configure_unattended_upgrades() {

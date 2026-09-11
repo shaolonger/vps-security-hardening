@@ -1,8 +1,8 @@
-# VPS Security Hardening v2.2.0
+# VPS Security Hardening v2.2.1
 
 一个面向 **Debian 12 / Debian 13** 的交互式 VPS 基础安全初始化与加固脚本。
 
-v2.2.0 的核心目标是：
+v2.2.1 延续 v2.2 的核心目标：
 
 > **最小侵入、防失联、可验证、可回滚、可重复执行，并兼容普通公网 VPS、厂商自定义 SSH 端口、NAT/端口映射 VPS、密码登录与强制 SSH Key 登录。**
 
@@ -87,7 +87,7 @@ SSH_EXTERNAL_PORT  用户从公网连接时使用
 5. 重启 SSH；
 6. 确认真正监听新端口；
 7. 要求第二终端真实登录；
-8. 输入 `VERIFIED` 后才最终收紧 UFW。
+8. 直接按 **回车**确认后才最终收紧 UFW。
 
 内部端口允许 `1-65535`，但 `443` 和 `19175` 被本项目预留给 sing-box，因此主动修改模式不允许选择这两个端口。
 
@@ -237,7 +237,7 @@ curl -fsSL https://raw.githubusercontent.com/shaolonger/vps-security-hardening/m
 应看到：
 
 ```text
-readonly HARDENING_VERSION="2.2.0"
+readonly HARDENING_VERSION="2.2.1"
 ```
 
 ---
@@ -375,7 +375,7 @@ VPS Fail2ban  : 22
 SSH 配置生效后，脚本不会直接继续重置最终 UFW，而是暂停：
 
 ```text
-请输入 VERIFIED / STATUS / ROLLBACK:
+请输入 回车确认 / STATUS / ROLLBACK:
 ```
 
 ### VERIFIED

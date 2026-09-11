@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.2.1 - 2026-09-11
+
+### Fail2ban startup verification
+
+- 修复 `systemctl restart fail2ban` 后立即执行 `fail2ban-client status sshd` 可能产生的启动时序误判。
+- 新增最多 20 秒的就绪等待，同时确认：
+  - `fail2ban.service` active；
+  - `fail2ban-client ping` 成功；
+  - `fail2ban-client status sshd` 成功。
+- 超时后不再只给一句错误，而会输出 `fail2ban-client status`、`systemctl status fail2ban` 和最近 50 行 journal，便于判断真正的 jail 配置问题。
+
+### SSH second-terminal confirmation
+
+- 第二终端实际 SSH 登录成功后，现在**直接按回车即可继续**。
+- `VERIFIED` 仍作为向后兼容输入保留，但不再要求用户输入。
+- `STATUS` 与 `ROLLBACK` 继续保留用于排查和回滚。
+
+---
 ## v2.2.0 - 2026-09-11
 
 v2.2.0 重构 SSH 端口模型，正式兼容厂商自定义 SSH 端口与 NAT / 公网端口映射 VPS。
