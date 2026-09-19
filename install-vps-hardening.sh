@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # Target: Debian 12 / 13
 # Authentication model: selectable root + password (default) or root + SSH public key
 
-readonly HARDENING_VERSION="2.2.3"
+readonly HARDENING_VERSION="2.2.4"
 readonly SCRIPT_NAME="VPS Security Hardening"
 readonly BACKUP_ROOT="/root/vps-hardening-backups"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
@@ -844,26 +844,19 @@ prepare_authentication_material() {
 }
 
 ensure_ufw_runtime_ready() {
-    # 部分厂商镜像会预装 ufw 软件包，却缺少 /etc/ufw/ufw.conf。
-    # Debian 的 ufw 包把模板放在 /usr/share/ufw/ufw.conf，运行时文件由安装流程生成。
-    # 单纯 `apt-get install ufw` 在软件包已被标记为 installed 时不会保证修复这种残缺状态。
+    # 部分厂商镜像会把 ufw 标记为已安装，但 /etc/ufw 下的运行时文件并不完整。
+    # Debian 的 ufw 软件包在 /usr/share/ufw 中提供默认模板；这里仅补齐缺失文件，
+    # 不覆盖已经存在的用户规则或自定义 before/after 规则。
     local need_reinstall=0
+    local repaired=0
 
     command -v ufw >/dev/null 2>&1 || die "UFW 命令不存在，软件包安装异常。"
     mkdir -p /etc/ufw
 
-    if [[ ! -f /etc/ufw/ufw.conf ]]; then
-        warn "检测到 UFW 软件包存在，但缺少 /etc/ufw/ufw.conf；正在从 Debian 随包模板自动修复。"
-        if [[ -f /usr/share/ufw/ufw.conf ]]; then
-            install -m 0644 /usr/share/ufw/ufw.conf /etc/ufw/ufw.conf
-        else
-            need_reinstall=1
-        fi
-    fi
-
-    # /etc/default/ufw 属于 UFW 的基础配置。若缺失，优先让 dpkg 恢复缺失配置文件。
-    if [[ ! -f "$UFW_DEFAULTS" ]]; then
-        warn "检测到缺少 $UFW_DEFAULTS；将尝试重新安装 ufw 并恢复缺失配置文件。"
+    # /etc/default/ufw 与 /etc/ufw/sysctl.conf 是 Debian 软件包管理的基础配置。
+    # 若缺失，先让 dpkg 通过 reinstall + force-confmiss 恢复缺失 conffile。
+    if [[ ! -f "$UFW_DEFAULTS" || ! -f /etc/ufw/sysctl.conf ]]; then
+        warn "检测到 UFW 基础配置缺失；将重新安装 ufw 并尝试恢复缺失的 Debian 配置文件。"
         need_reinstall=1
     fi
 
@@ -871,20 +864,82 @@ ensure_ufw_runtime_ready() {
         apt-get install --reinstall -y -o Dpkg::Options::="--force-confmiss" ufw
     fi
 
-    # 某些旧/定制镜像即使重新安装后仍可能没有生成运行时 ufw.conf；
-    # 只在目标文件缺失时从随包模板补齐，不覆盖用户已有配置。
-    if [[ ! -f /etc/ufw/ufw.conf && -f /usr/share/ufw/ufw.conf ]]; then
-        install -m 0644 /usr/share/ufw/ufw.conf /etc/ufw/ufw.conf
+    # Debian 随包模板 -> UFW 运行时文件。
+    # 权限与 UFW 默认安装行为保持一致：rules 文件 0640，ufw.conf 0644。
+    repair_ufw_file_from_template() {
+        local target=$1 template=$2 mode=$3 label=$4
+        [[ -f "$target" ]] && return 0
+
+        if [[ ! -f "$template" ]]; then
+            warn "无法修复 ${label}：缺少随包模板 ${template}。"
+            return 1
+        fi
+
+        warn "检测到缺少 ${target}；正在从 Debian UFW 随包模板自动修复。"
+        install -m "$mode" "$template" "$target"
+        repaired=1
+    }
+
+    repair_ufw_file_from_template /etc/ufw/ufw.conf     /usr/share/ufw/ufw.conf     0644 'ufw.conf' || true
+    repair_ufw_file_from_template /etc/ufw/user.rules   /usr/share/ufw/user.rules   0640 'IPv4 user.rules' || true
+    repair_ufw_file_from_template /etc/ufw/user6.rules  /usr/share/ufw/user6.rules  0640 'IPv6 user6.rules' || true
+    repair_ufw_file_from_template /etc/ufw/before.rules /usr/share/ufw/before.rules 0640 'IPv4 before.rules' || true
+    repair_ufw_file_from_template /etc/ufw/after.rules  /usr/share/ufw/after.rules  0640 'IPv4 after.rules' || true
+    repair_ufw_file_from_template /etc/ufw/before6.rules /usr/share/ufw/before6.rules 0640 'IPv6 before6.rules' || true
+    repair_ufw_file_from_template /etc/ufw/after6.rules  /usr/share/ufw/after6.rules  0640 'IPv6 after6.rules' || true
+
+    # 必需文件逐项确认。不要等到 ufw reset/enable 时才暴露缺失。
+    local missing=0 f
+    for f in \
+        "$UFW_DEFAULTS" \
+        /etc/ufw/ufw.conf \
+        /etc/ufw/sysctl.conf \
+        /etc/ufw/user.rules \
+        /etc/ufw/user6.rules \
+        /etc/ufw/before.rules \
+        /etc/ufw/after.rules \
+        /etc/ufw/before6.rules \
+        /etc/ufw/after6.rules; do
+        if [[ ! -f "$f" ]]; then
+            err "[缺失] $f"
+            missing=1
+        fi
+    done
+
+    if (( missing == 1 )); then
+        warn "UFW 运行时文件仍不完整。dpkg 校验信息："
+        dpkg -V ufw 2>&1 || true
+        die "UFW 修复失败，未继续修改防火墙。"
     fi
 
-    [[ -f /etc/ufw/ufw.conf ]] || die "UFW 修复后仍缺少 /etc/ufw/ufw.conf。"
-    [[ -f "$UFW_DEFAULTS" ]] || die "UFW 修复后仍缺少 $UFW_DEFAULTS。"
+    # `ufw status` 即使 inactive 也应成功。若第一次仍失败，再做一次软件包重装 + 缺失模板补齐，
+    # 用于兼容更激进的厂商裁剪镜像；绝不删除已有用户规则。
+    if ! LC_ALL=C ufw status >/dev/null 2>&1; then
+        warn "UFW 首次完整性检查仍失败，正在执行一次安全的 ufw 软件包重装后复检……"
+        apt-get install --reinstall -y -o Dpkg::Options::="--force-confmiss" ufw
 
-    # `ufw status` 即使在 inactive 状态也应能正常返回；这里用于确认 CLI 与运行时目录完整。
+        repair_ufw_file_from_template /etc/ufw/ufw.conf      /usr/share/ufw/ufw.conf      0644 'ufw.conf' || true
+        repair_ufw_file_from_template /etc/ufw/user.rules    /usr/share/ufw/user.rules    0640 'IPv4 user.rules' || true
+        repair_ufw_file_from_template /etc/ufw/user6.rules   /usr/share/ufw/user6.rules   0640 'IPv6 user6.rules' || true
+        repair_ufw_file_from_template /etc/ufw/before.rules  /usr/share/ufw/before.rules  0640 'IPv4 before.rules' || true
+        repair_ufw_file_from_template /etc/ufw/after.rules   /usr/share/ufw/after.rules   0640 'IPv4 after.rules' || true
+        repair_ufw_file_from_template /etc/ufw/before6.rules /usr/share/ufw/before6.rules 0640 'IPv6 before6.rules' || true
+        repair_ufw_file_from_template /etc/ufw/after6.rules  /usr/share/ufw/after6.rules  0640 'IPv6 after6.rules' || true
+    fi
+
     if ! LC_ALL=C ufw status >/dev/null 2>&1; then
         warn "UFW 完整性检查失败，当前诊断如下："
+        printf '%s\n' '--- /etc/ufw ---'
+        ls -la /etc/ufw 2>&1 || true
+        printf '%s\n' '--- dpkg -V ufw ---'
+        dpkg -V ufw 2>&1 || true
+        printf '%s\n' '--- ufw status ---'
         LC_ALL=C ufw status 2>&1 || true
         die "UFW 安装/运行时配置仍不完整，未继续修改防火墙。"
+    fi
+
+    if (( repaired == 1 )); then
+        ok "UFW 缺失的运行时文件已补齐，完整性检查通过。"
     fi
 }
 

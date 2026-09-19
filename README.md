@@ -1,34 +1,44 @@
-# VPS Security Hardening v2.2.3
+# VPS Security Hardening v2.2.4
 
 一个面向 **Debian 12 / Debian 13** 的交互式 VPS 基础安全初始化与加固脚本。
 
-v2.2.3 延续 v2.2 的核心目标，并继续增强对厂商定制 Debian 镜像的兼容性：除 v2.2.2 的 OpenSSH Include 修复外，本版还会自动检测并修复“已安装 UFW、但 `/etc/ufw/ufw.conf` 缺失”的残缺 UFW 环境：
+v2.2.4 延续 v2.2 的核心目标，并继续增强对厂商定制 Debian 镜像的兼容性：除 OpenSSH Include 修复外，本版把 UFW 修复从“只补 `ufw.conf`”升级为“检查并补齐完整运行时规则文件”。
 
 > **最小侵入、防失联、可验证、可回滚、可重复执行，并兼容普通公网 VPS、厂商自定义 SSH 端口、NAT/端口映射 VPS、密码登录与强制 SSH Key 登录。**
 
 ---
 
-## v2.2.3：UFW 残缺安装自动修复
+## v2.2.4：UFW 残缺运行时完整修复
 
-部分 VPS 厂商镜像可能已经把 `ufw` 标记为已安装，但运行时文件并不完整，例如缺少：
-
-```text
-/etc/ufw/ufw.conf
-```
-
-这种情况下，仅执行 `apt-get install ufw` 可能不会重新生成缺失文件，随后执行 `ufw reset` 会出现：
+部分 VPS 厂商镜像可能已经把 `ufw` 标记为已安装，但 `/etc/ufw/` 被裁剪，只剩部分文件。常见连续报错包括：
 
 ```text
 ERROR: Couldn't stat '/etc/ufw/ufw.conf'
+ERROR: Couldn't stat '/etc/ufw/user.rules'
 ```
 
-v2.2.3 会在组件安装后以及最终写入 UFW 规则前再次检查 UFW：
+Debian 的 UFW 运行依赖多组配置/规则文件。v2.2.4 会在**不覆盖已有文件**的前提下检查并补齐缺失项：
 
-- 缺少 `/etc/ufw/ufw.conf` 时，从软件包自带模板 `/usr/share/ufw/ufw.conf` 安全补齐；
-- 缺少 `/etc/default/ufw` 时，尝试重新安装 UFW 并恢复缺失配置；
-- 不覆盖已经存在的用户 UFW 配置；
-- 修复后执行 `ufw status` 验证运行时完整性；
-- 验证失败则停止，而不是冒险继续启用防火墙。
+```text
+/etc/ufw/ufw.conf
+/etc/ufw/user.rules
+/etc/ufw/user6.rules
+/etc/ufw/before.rules
+/etc/ufw/after.rules
+/etc/ufw/before6.rules
+/etc/ufw/after6.rules
+/etc/ufw/sysctl.conf
+/etc/default/ufw
+```
+
+处理原则：
+
+- `user*.rules`、`before*.rules`、`after*.rules`、`ufw.conf` 缺失时，优先从 `/usr/share/ufw/` 的 Debian 随包模板补齐；
+- `/etc/default/ufw` 或 `/etc/ufw/sysctl.conf` 缺失时，通过 `apt-get install --reinstall ... --force-confmiss ufw` 恢复 Debian conffile；
+- **只补缺失文件，绝不覆盖已经存在的用户 UFW 规则**；
+- 首次 `ufw status` 仍失败时，再安全重装一次软件包并复检；
+- 仍失败时自动打印 `/etc/ufw` 文件列表、`dpkg -V ufw` 与 `ufw status` 诊断后停止；
+- 不会为了“修好”UFW 而删除 lock、清空现有规则文件或强行启用防火墙。
 
 ---
 
@@ -284,7 +294,7 @@ curl -fsSL https://raw.githubusercontent.com/shaolonger/vps-security-hardening/m
 应看到：
 
 ```text
-readonly HARDENING_VERSION="2.2.3"
+readonly HARDENING_VERSION="2.2.4"
 ```
 
 ---

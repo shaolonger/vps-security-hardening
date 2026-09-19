@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.2.4 - 2026-09-18
+
+### Complete UFW runtime repair for stripped vendor images
+
+- 修复 v2.2.3 只补齐 `/etc/ufw/ufw.conf` 后，部分厂商镜像继续报 `ERROR: Couldn't stat '/etc/ufw/user.rules'` 的问题。
+- `ensure_ufw_runtime_ready()` 现在检查并补齐完整的 UFW 运行时规则集合：`user.rules`、`user6.rules`、`before.rules`、`after.rules`、`before6.rules`、`after6.rules` 与 `ufw.conf`。
+- 所有规则文件只在目标缺失时从 `/usr/share/ufw/` 的 Debian 随包模板恢复；已有文件绝不覆盖。
+- `/etc/default/ufw` 或 `/etc/ufw/sysctl.conf` 缺失时使用 `apt-get install --reinstall` + `--force-confmiss` 恢复 Debian conffile。
+- 首次 `ufw status` 失败时自动进行一次安全重装/复检；仍失败则输出 `/etc/ufw`、`dpkg -V ufw` 和 `ufw status` 诊断后停止。
+- 保留防失联原则：修复阶段不会启用 UFW，只有第二终端 SSH 实测通过后才写入最终规则并启用。
+
+---
+
 ## v2.2.3 - 2026-09-18
 
 ### UFW incomplete vendor image compatibility
