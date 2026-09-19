@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly HARDENING_VERSION="2.2.1"
+readonly HARDENING_VERSION="2.2.2"
 readonly BACKUP_ROOT="/root/vps-hardening-backups"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
-readonly SSH_MANAGED_CONFIG="/etc/ssh/sshd_config.d/00-vps-hardening.conf"
+readonly SSH_MANAGED_CONFIG="/etc/ssh/sshd_config.vps-hardening.conf"
+readonly SSH_LEGACY_MANAGED_CONFIG="/etc/ssh/sshd_config.d/00-vps-hardening.conf"
 readonly SSH_BANNER="/etc/ssh/banner.vps-hardening"
 readonly UFW_DEFAULTS="/etc/default/ufw"
 readonly FAIL2BAN_CONFIG="/etc/fail2ban/jail.d/99-vps-hardening.local"
@@ -123,7 +124,18 @@ EOF_HELP
 
 restore_ssh() {
     restore_file "${SSH_CONFIG_EXISTED:-0}" "$BACKUP_DIR/sshd_config" "$SSH_CONFIG"
-    restore_file "${SSH_MANAGED_CONFIG_EXISTED:-0}" "$BACKUP_DIR/00-vps-hardening.conf" "$SSH_MANAGED_CONFIG"
+
+    # v2.2.2+ stores the managed file outside sshd_config.d. Older v2 backups stored it as
+    # 00-vps-hardening.conf inside sshd_config.d, so restore both layouts safely.
+    if [[ -e "$BACKUP_DIR/sshd_config.vps-hardening.conf" || -n "${SSH_LEGACY_MANAGED_CONFIG_EXISTED+x}" ]]; then
+        restore_file "${SSH_MANAGED_CONFIG_EXISTED:-0}" "$BACKUP_DIR/sshd_config.vps-hardening.conf" "$SSH_MANAGED_CONFIG"
+        restore_file "${SSH_LEGACY_MANAGED_CONFIG_EXISTED:-0}" "$BACKUP_DIR/00-vps-hardening.conf" "$SSH_LEGACY_MANAGED_CONFIG"
+    else
+        # Legacy v2.0-v2.2.1 backup: SSH_MANAGED_CONFIG_EXISTED referred to the drop-in path.
+        rm -f "$SSH_MANAGED_CONFIG"
+        restore_file "${SSH_MANAGED_CONFIG_EXISTED:-0}" "$BACKUP_DIR/00-vps-hardening.conf" "$SSH_LEGACY_MANAGED_CONFIG"
+    fi
+
     restore_file "${SSH_BANNER_EXISTED:-0}" "$BACKUP_DIR/banner.vps-hardening" "$SSH_BANNER"
 
     /usr/sbin/sshd -t || die "恢复后的 SSH 配置未通过 sshd -t。为避免失联，没有切换 SSH listener。请保持当前会话并检查 $SSH_CONFIG。"

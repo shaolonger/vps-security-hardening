@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.2.2 - 2026-09-18
+
+### Debian 12 / OpenSSH AuthenticationMethods compatibility
+
+- 修复 Debian 12 / OpenSSH 9.2 上密码模式可能出现：
+  - `/etc/ssh/sshd_config.d/00-vps-hardening.conf line ...: "any" must appear alone in AuthenticationMethods`
+- 根因不是 Debian 12 不支持 `AuthenticationMethods any`；Debian 12 的 OpenSSH 文档支持该值。问题来自旧版把 managed config 放在 `/etc/ssh/sshd_config.d/`，同时又在主配置第一行精确 Include；而 Debian 默认通常还会通过 `Include /etc/ssh/sshd_config.d/*.conf` 再加载一次，造成同一 `AuthenticationMethods any` 被解析两次。
+- SSH managed config 改为 `/etc/ssh/sshd_config.vps-hardening.conf`，位于 `sshd_config.d` 目录之外。
+- 主配置只保留一条精确 Include，并在应用新配置前清理旧版 exact Include 与旧 drop-in。
+- 事务回滚现在同时备份/恢复新旧两种 managed config 布局。
+- `rollback.sh` 继续兼容 v2.0-v2.2.1 的旧备份：旧备份中的 `00-vps-hardening.conf` 会恢复到旧 drop-in 路径，新备份则恢复到新的独立 managed config 路径。
+
+---
+
 ## v2.2.1 - 2026-09-11
 
 ### Fail2ban startup verification

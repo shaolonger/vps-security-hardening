@@ -5,11 +5,12 @@ set -Eeuo pipefail
 # Target: Debian 12 / 13
 # Authentication model: selectable root + password (default) or root + SSH public key
 
-readonly HARDENING_VERSION="2.2.1"
+readonly HARDENING_VERSION="2.2.2"
 readonly SCRIPT_NAME="VPS Security Hardening"
 readonly BACKUP_ROOT="/root/vps-hardening-backups"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
-readonly SSH_MANAGED_CONFIG="/etc/ssh/sshd_config.d/00-vps-hardening.conf"
+readonly SSH_MANAGED_CONFIG="/etc/ssh/sshd_config.vps-hardening.conf"
+readonly SSH_LEGACY_MANAGED_CONFIG="/etc/ssh/sshd_config.d/00-vps-hardening.conf"
 readonly SSH_BANNER="/etc/ssh/banner.vps-hardening"
 readonly UFW_DEFAULTS="/etc/default/ufw"
 readonly FAIL2BAN_CONFIG="/etc/fail2ban/jail.d/99-vps-hardening.local"
@@ -165,7 +166,9 @@ rollback_ssh_transaction_best_effort() {
         restore_file_from_backup "${SSH_CONFIG_EXISTED:-0}" \
             "$BACKUP_DIR/sshd_config" "$SSH_CONFIG"
         restore_file_from_backup "${SSH_MANAGED_CONFIG_EXISTED:-0}" \
-            "$BACKUP_DIR/00-vps-hardening.conf" "$SSH_MANAGED_CONFIG"
+            "$BACKUP_DIR/sshd_config.vps-hardening.conf" "$SSH_MANAGED_CONFIG"
+        restore_file_from_backup "${SSH_LEGACY_MANAGED_CONFIG_EXISTED:-0}" \
+            "$BACKUP_DIR/00-vps-hardening.conf" "$SSH_LEGACY_MANAGED_CONFIG"
         restore_file_from_backup "${SSH_BANNER_EXISTED:-0}" \
             "$BACKUP_DIR/banner.vps-hardening" "$SSH_BANNER"
         if [[ "${ROOT_AUTH_KEYS_TRACKED:-0}" == "1" ]]; then
@@ -714,7 +717,8 @@ capture_state_and_backup() {
     old_timezone=$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo UTC)
 
     [[ -e "$SSH_CONFIG" ]] && cp -a "$SSH_CONFIG" "$BACKUP_DIR/sshd_config"
-    [[ -e "$SSH_MANAGED_CONFIG" ]] && cp -a "$SSH_MANAGED_CONFIG" "$BACKUP_DIR/00-vps-hardening.conf"
+    [[ -e "$SSH_MANAGED_CONFIG" ]] && cp -a "$SSH_MANAGED_CONFIG" "$BACKUP_DIR/sshd_config.vps-hardening.conf"
+    [[ -e "$SSH_LEGACY_MANAGED_CONFIG" ]] && cp -a "$SSH_LEGACY_MANAGED_CONFIG" "$BACKUP_DIR/00-vps-hardening.conf"
     [[ -e "$SSH_BANNER" ]] && cp -a "$SSH_BANNER" "$BACKUP_DIR/banner.vps-hardening"
     [[ -d /etc/ufw ]] && cp -a /etc/ufw "$BACKUP_DIR/ufw"
     [[ -e "$UFW_DEFAULTS" ]] && cp -a "$UFW_DEFAULTS" "$BACKUP_DIR/default-ufw"
@@ -754,7 +758,8 @@ capture_state_and_backup() {
     manifest_set SSH_SOCKET_WAS_ACTIVE "$(unit_exists "$SSH_SOCKET_UNIT" && unit_active_flag "$SSH_SOCKET_UNIT" || echo 0)"
     manifest_set SSH_SOCKET_WAS_ENABLED_STATE "$(unit_exists "$SSH_SOCKET_UNIT" && unit_enabled_state "$SSH_SOCKET_UNIT" || true)"
     manifest_set SSH_CONFIG_EXISTED "$([[ -e "$SSH_CONFIG" ]] && echo 1 || echo 0)"
-    manifest_set SSH_MANAGED_CONFIG_EXISTED "$([[ -e "$BACKUP_DIR/00-vps-hardening.conf" ]] && echo 1 || echo 0)"
+    manifest_set SSH_MANAGED_CONFIG_EXISTED "$([[ -e "$BACKUP_DIR/sshd_config.vps-hardening.conf" ]] && echo 1 || echo 0)"
+    manifest_set SSH_LEGACY_MANAGED_CONFIG_EXISTED "$([[ -e "$BACKUP_DIR/00-vps-hardening.conf" ]] && echo 1 || echo 0)"
     manifest_set SSH_BANNER_EXISTED "$([[ -e "$BACKUP_DIR/banner.vps-hardening" ]] && echo 1 || echo 0)"
     manifest_set UFW_WAS_INSTALLED "$(pkg_installed_flag ufw)"
     manifest_set UFW_WAS_ACTIVE "$(command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status 2>/dev/null | grep -q '^Status: active' && echo 1 || echo 0)"
@@ -952,8 +957,13 @@ EOF_SSH
 *******************************************************************
 EOF_BANNER
 
-    # Exact Include is intentionally placed first. We do not rewrite the rest of the provider's sshd_config.
+    # Keep the managed file OUTSIDE sshd_config.d and include it exactly once at the top.
+    # Debian normally already has `Include /etc/ssh/sshd_config.d/*.conf`; placing our file
+    # inside that directory AND adding an exact Include would parse it twice. On OpenSSH 8.7+
+    # a second `AuthenticationMethods any` may fail with: "any" must appear alone.
+    sed -i '\|^[[:space:]]*Include[[:space:]]\+/etc/ssh/sshd_config\.vps-hardening\.conf[[:space:]]*$|d' "$SSH_CONFIG"
     sed -i '\|^[[:space:]]*Include[[:space:]]\+/etc/ssh/sshd_config\.d/00-vps-hardening\.conf[[:space:]]*$|d' "$SSH_CONFIG"
+    rm -f "$SSH_LEGACY_MANAGED_CONFIG"
     sed -i "1iInclude ${SSH_MANAGED_CONFIG}" "$SSH_CONFIG"
 }
 

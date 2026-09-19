@@ -1,8 +1,8 @@
-# VPS Security Hardening v2.2.1
+# VPS Security Hardening v2.2.2
 
 一个面向 **Debian 12 / Debian 13** 的交互式 VPS 基础安全初始化与加固脚本。
 
-v2.2.1 延续 v2.2 的核心目标：
+v2.2.2 延续 v2.2 的核心目标，并修复 Debian 12 / OpenSSH 9.2 下 SSH managed config 被重复 Include 时的兼容问题：
 
 > **最小侵入、防失联、可验证、可回滚、可重复执行，并兼容普通公网 VPS、厂商自定义 SSH 端口、NAT/端口映射 VPS、密码登录与强制 SSH Key 登录。**
 
@@ -130,6 +130,29 @@ Fail2ban : 22
 
 ---
 
+
+### Debian 12 / OpenSSH 兼容说明
+
+从 v2.2.2 起，本项目的 SSH managed config 改为：
+
+```text
+/etc/ssh/sshd_config.vps-hardening.conf
+```
+
+脚本会把它作为 `/etc/ssh/sshd_config` 的第一条精确 `Include`，并确保旧版：
+
+```text
+/etc/ssh/sshd_config.d/00-vps-hardening.conf
+```
+
+不再同时被加载。原因是 Debian 默认通常已经存在 `Include /etc/ssh/sshd_config.d/*.conf`；旧版同时再插入一次精确 Include 时，同一个文件可能被解析两次。对于密码模式里的 `AuthenticationMethods any`，OpenSSH 8.7+ 的解析行为可能因此报：
+
+```text
+"any" must appear alone in AuthenticationMethods
+```
+
+v2.2.2 通过“managed config 放到 `sshd_config.d` 目录之外 + 只精确 Include 一次”彻底避免重复解析，同时仍保持本项目 SSH 配置优先于厂商后续配置。
+
 ## SSH 认证方式
 
 端口策略之后会询问：
@@ -237,7 +260,7 @@ curl -fsSL https://raw.githubusercontent.com/shaolonger/vps-security-hardening/m
 应看到：
 
 ```text
-readonly HARDENING_VERSION="2.2.1"
+readonly HARDENING_VERSION="2.2.2"
 ```
 
 ---
@@ -497,7 +520,7 @@ apt-daily-upgrade.timer
 主要保存：
 
 - `/etc/ssh/sshd_config`
-- 本项目 SSH drop-in
+- 本项目独立 SSH managed config `/etc/ssh/sshd_config.vps-hardening.conf`
 - SSH Banner
 - UFW 配置
 - Fail2ban drop-in
