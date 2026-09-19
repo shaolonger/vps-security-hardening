@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # Target: Debian 12 / 13
 # Authentication model: selectable root + password (default) or root + SSH public key
 
-readonly HARDENING_VERSION="2.2.2"
+readonly HARDENING_VERSION="2.2.3"
 readonly SCRIPT_NAME="VPS Security Hardening"
 readonly BACKUP_ROOT="/root/vps-hardening-backups"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
@@ -843,6 +843,51 @@ prepare_authentication_material() {
     fi
 }
 
+ensure_ufw_runtime_ready() {
+    # 部分厂商镜像会预装 ufw 软件包，却缺少 /etc/ufw/ufw.conf。
+    # Debian 的 ufw 包把模板放在 /usr/share/ufw/ufw.conf，运行时文件由安装流程生成。
+    # 单纯 `apt-get install ufw` 在软件包已被标记为 installed 时不会保证修复这种残缺状态。
+    local need_reinstall=0
+
+    command -v ufw >/dev/null 2>&1 || die "UFW 命令不存在，软件包安装异常。"
+    mkdir -p /etc/ufw
+
+    if [[ ! -f /etc/ufw/ufw.conf ]]; then
+        warn "检测到 UFW 软件包存在，但缺少 /etc/ufw/ufw.conf；正在从 Debian 随包模板自动修复。"
+        if [[ -f /usr/share/ufw/ufw.conf ]]; then
+            install -m 0644 /usr/share/ufw/ufw.conf /etc/ufw/ufw.conf
+        else
+            need_reinstall=1
+        fi
+    fi
+
+    # /etc/default/ufw 属于 UFW 的基础配置。若缺失，优先让 dpkg 恢复缺失配置文件。
+    if [[ ! -f "$UFW_DEFAULTS" ]]; then
+        warn "检测到缺少 $UFW_DEFAULTS；将尝试重新安装 ufw 并恢复缺失配置文件。"
+        need_reinstall=1
+    fi
+
+    if (( need_reinstall == 1 )); then
+        apt-get install --reinstall -y -o Dpkg::Options::="--force-confmiss" ufw
+    fi
+
+    # 某些旧/定制镜像即使重新安装后仍可能没有生成运行时 ufw.conf；
+    # 只在目标文件缺失时从随包模板补齐，不覆盖用户已有配置。
+    if [[ ! -f /etc/ufw/ufw.conf && -f /usr/share/ufw/ufw.conf ]]; then
+        install -m 0644 /usr/share/ufw/ufw.conf /etc/ufw/ufw.conf
+    fi
+
+    [[ -f /etc/ufw/ufw.conf ]] || die "UFW 修复后仍缺少 /etc/ufw/ufw.conf。"
+    [[ -f "$UFW_DEFAULTS" ]] || die "UFW 修复后仍缺少 $UFW_DEFAULTS。"
+
+    # `ufw status` 即使在 inactive 状态也应能正常返回；这里用于确认 CLI 与运行时目录完整。
+    if ! LC_ALL=C ufw status >/dev/null 2>&1; then
+        warn "UFW 完整性检查失败，当前诊断如下："
+        LC_ALL=C ufw status 2>&1 || true
+        die "UFW 安装/运行时配置仍不完整，未继续修改防火墙。"
+    fi
+}
+
 install_required_packages() {
     CURRENT_STAGE="APT 更新与组件安装"
     log "[1/8] 更新 APT 索引并安装必要组件……"
@@ -854,6 +899,7 @@ install_required_packages() {
         apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
     fi
     apt-get install -y ca-certificates curl iproute2 ufw fail2ban unattended-upgrades apt-listchanges
+    ensure_ufw_runtime_ready
 
     ok "APT 与必要组件处理完成（不会自动执行 apt autoremove）。"
 }
@@ -1093,6 +1139,9 @@ ufw_fail_safe() {
 configure_final_ufw() {
     CURRENT_STAGE="最终 UFW"
     log "[5/8] 配置最终 UFW：只保留 SSH + 443 + 19175……"
+
+    # 最终修改前再次确认 UFW 运行时配置完整，兼容厂商残缺/预装镜像。
+    ensure_ufw_runtime_ready
 
     if [[ "$HAS_GLOBAL_IPV6" == "1" ]]; then
         [[ -f "$UFW_DEFAULTS" ]] || ufw_fail_safe

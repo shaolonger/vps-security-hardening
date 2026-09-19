@@ -1,10 +1,34 @@
-# VPS Security Hardening v2.2.2
+# VPS Security Hardening v2.2.3
 
 一个面向 **Debian 12 / Debian 13** 的交互式 VPS 基础安全初始化与加固脚本。
 
-v2.2.2 延续 v2.2 的核心目标，并修复 Debian 12 / OpenSSH 9.2 下 SSH managed config 被重复 Include 时的兼容问题：
+v2.2.3 延续 v2.2 的核心目标，并继续增强对厂商定制 Debian 镜像的兼容性：除 v2.2.2 的 OpenSSH Include 修复外，本版还会自动检测并修复“已安装 UFW、但 `/etc/ufw/ufw.conf` 缺失”的残缺 UFW 环境：
 
 > **最小侵入、防失联、可验证、可回滚、可重复执行，并兼容普通公网 VPS、厂商自定义 SSH 端口、NAT/端口映射 VPS、密码登录与强制 SSH Key 登录。**
+
+---
+
+## v2.2.3：UFW 残缺安装自动修复
+
+部分 VPS 厂商镜像可能已经把 `ufw` 标记为已安装，但运行时文件并不完整，例如缺少：
+
+```text
+/etc/ufw/ufw.conf
+```
+
+这种情况下，仅执行 `apt-get install ufw` 可能不会重新生成缺失文件，随后执行 `ufw reset` 会出现：
+
+```text
+ERROR: Couldn't stat '/etc/ufw/ufw.conf'
+```
+
+v2.2.3 会在组件安装后以及最终写入 UFW 规则前再次检查 UFW：
+
+- 缺少 `/etc/ufw/ufw.conf` 时，从软件包自带模板 `/usr/share/ufw/ufw.conf` 安全补齐；
+- 缺少 `/etc/default/ufw` 时，尝试重新安装 UFW 并恢复缺失配置；
+- 不覆盖已经存在的用户 UFW 配置；
+- 修复后执行 `ufw status` 验证运行时完整性；
+- 验证失败则停止，而不是冒险继续启用防火墙。
 
 ---
 
@@ -260,7 +284,7 @@ curl -fsSL https://raw.githubusercontent.com/shaolonger/vps-security-hardening/m
 应看到：
 
 ```text
-readonly HARDENING_VERSION="2.2.2"
+readonly HARDENING_VERSION="2.2.3"
 ```
 
 ---

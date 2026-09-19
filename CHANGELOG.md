@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.2.3 - 2026-09-18
+
+### UFW incomplete vendor image compatibility
+
+- 修复部分 Debian 12 厂商镜像中已安装 `ufw` 软件包、但 `/etc/ufw/ufw.conf` 缺失时，最终 UFW 阶段报错：`ERROR: Couldn't stat '/etc/ufw/ufw.conf'`。
+- 新增 `ensure_ufw_runtime_ready()`：安装组件后和最终写入 UFW 规则前各执行一次完整性检查。
+- 若 `/etc/ufw/ufw.conf` 缺失，优先从 Debian UFW 随包模板 `/usr/share/ufw/ufw.conf` 补齐；只在目标文件缺失时写入，不覆盖用户已有配置。
+- 若 `/etc/default/ufw` 缺失，自动使用 `apt-get install --reinstall` + `--force-confmiss` 尝试恢复缺失配置文件。
+- 修复后使用 `ufw status` 做运行时完整性验证；仍异常时停止，不继续修改防火墙。
+- 保留原有 fail-safe：最终 UFW 配置失败时不会继续到 Fail2ban/自动更新阶段，并尽力避免 SSH 被错误锁死。
+
+---
+
 ## v2.2.2 - 2026-09-18
 
 ### Debian 12 / OpenSSH AuthenticationMethods compatibility

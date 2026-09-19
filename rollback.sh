@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly HARDENING_VERSION="2.2.2"
+readonly HARDENING_VERSION="2.2.3"
 readonly BACKUP_ROOT="/root/vps-hardening-backups"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 readonly SSH_MANAGED_CONFIG="/etc/ssh/sshd_config.vps-hardening.conf"
